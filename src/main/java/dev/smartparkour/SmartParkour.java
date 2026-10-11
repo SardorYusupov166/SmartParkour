@@ -39,7 +39,10 @@ public final class SmartParkour implements ClientModInitializer {
     private int approachStallLimitTicks = 5;
     private int approachStallTicks;
     private Vec3 lastApproachPosition;
-    private static final double CENTER_TOLERANCE = 0.075;
+    private int centerToleranceXPixels = 3;
+    private int centerToleranceZPixels = 3;
+    private boolean exactCenter = false;
+    private static final double LANDING_Y_TOLERANCE = 0.1;
     private static final int SEARCH_RADIUS = 6;
     private static final double YAW_TOLERANCE_DEGREES = 2.0;
     private int facingTicks;
@@ -103,14 +106,26 @@ public final class SmartParkour implements ClientModInitializer {
             clearRoute();
             missingTargetTicks = 0;
             returningHome = false;
-            if (mc.player != null) mc.player.displayClientMessage(Component.literal("SmartParkour 0.9.8: " + (enabled ? "ON" : "OFF")), true);
+            if (mc.player != null) mc.player.displayClientMessage(Component.literal("SmartParkour 0.10.1: " + (enabled ? "ON" : "OFF")), true);
         }
         toggleWasDown = down;
         if (!enabled || mc.player == null || mc.level == null) return;
         if (mc.screen != null && !continueInMenus) { release(mc); clearInactivityWatch(); return; }
         if (inactivityRescue && checkInactivity(mc)) {
+            // Re-plan from the current platform before deciding to go home.
+            BlockPos here = mc.player.blockPosition().below();
+            BlockPos alternative = mc.player.onGround() && isTarget(mc, here) ? findTarget(mc) : null;
             reset(mc);
-            mc.player.displayClientMessage(Component.literal("SmartParkour: перезапуск после 5 секунд бездействия"), true);
+            if (alternative != null) {
+                target = alternative;
+                departure = here.immutable();
+                transition(State.ROTATE);
+                mc.player.displayClientMessage(Component.literal("SmartParkour: найден новый прыжок"), true);
+            } else if (mc.player.onGround()) {
+                returningHome = true;
+                transition(State.RETURN_ROTATE);
+                mc.player.displayClientMessage(Component.literal("SmartParkour: прыжков нет, возврат домой"), true);
+            }
             return;
         }
         // A jump target is immutable until landing, failure or explicit cancellation.
@@ -175,7 +190,7 @@ public final class SmartParkour implements ClientModInitializer {
                 BlockPos under = departure;
                 double cx = under.getX() + .5, cz = under.getZ() + .5;
                 if (!isFacing(mc, target)) { release(mc); transition(State.ROTATE); return; }
-                if (Math.hypot(cx - pos.x, cz - pos.z) > CENTER_TOLERANCE) {
+                if (!withinCenter(pos.x, pos.z, under)) {
                     steer(mc, cx - pos.x, cz - pos.z, false, false);
                 } else { release(mc); transition(State.APPROACH); }
             }
@@ -193,25 +208,32 @@ public final class SmartParkour implements ClientModInitializer {
                 // Never insist on walking to the edge when the next block is close.
                 // A nearby or elevated block can physically obstruct that approach.
                 double travel = Math.max(0.0, Math.min(.5 - EDGE_MARGIN,
-                        (dist - CLOSE_JUMP_DISTANCE) * 0.28));
+                        (dist - 1.45) * 0.65));
                 double edgeX = under.getX() + .5 + ux * travel / Math.max(Math.abs(ux), Math.abs(uz));
                 double edgeZ = under.getZ() + .5 + uz * travel / Math.max(Math.abs(ux), Math.abs(uz));
                 double remain = (edgeX - pos.x) * ux + (edgeZ - pos.z) * uz;
-                boolean sprint = dist > 2.65 || target.getY() > under.getY();
+                // A two-block center-to-center jump needs sprint momentum and a
+                // controlled takeoff closer to the edge, not a standing jump.
+                boolean longJump = dist >= 1.75;
+                boolean sprint = longJump || target.getY() > under.getY();
                 // If movement is blocked for several ticks, jump rather than stall.
                 if (lastApproachPosition != null &&
                         Math.hypot(pos.x - lastApproachPosition.x, pos.z - lastApproachPosition.z) < 0.012)
                     approachStallTicks++;
                 else approachStallTicks = 0;
                 lastApproachPosition = pos;
-                boolean closeJump = dist <= CLOSE_JUMP_DISTANCE;
-                boolean jump = closeJump || approachStallTicks >= approachStallLimitTicks ||
-                        remain <= Math.max(.10, mc.player.getDeltaMovement().horizontalDistance() * 1.35);
+                boolean closeJump = dist < 1.75;
+                // For longer jumps, build horizontal velocity before takeoff.
+                double horizontalSpeed = mc.player.getDeltaMovement().horizontalDistance();
+                boolean readyToJump = !longJump || horizontalSpeed >= 0.11 || maxApproachDisplacement(pos, under) >= 0.39;
+                boolean jump = closeJump || (readyToJump && approachStallTicks >= approachStallLimitTicks) ||
+                        (readyToJump &&
+                        remain <= Math.max(.10, horizontalSpeed * 1.35));
                 // Do not walk off the departure block while waiting for takeoff.
                 // At the edge, force the takeoff on this tick.
                 double maxLocal = Math.max(Math.abs(pos.x - (under.getX() + .5)),
                                            Math.abs(pos.z - (under.getZ() + .5)));
-                if (maxLocal >= .43) jump = true;
+                if (maxLocal >= .40) jump = true;
                 steer(mc, ux, uz, sprint, jump);
                 if (jump) { jumpLatch = true; transition(State.FLIGHT); }
             }
@@ -255,7 +277,7 @@ public final class SmartParkour implements ClientModInitializer {
                 // Confirm landing against the TARGET block's exact top surface.
                 // Never use rounding of the player's Y (e.g. 56.8 -> 56).
                 boolean landedAtSurface = mc.player.onGround()
-                        && Math.abs(mc.player.getY() - (target.getY() + 1.0)) <= 0.001
+                        && Math.abs(mc.player.getY() - (target.getY() + 1.0)) <= LANDING_Y_TOLERANCE
                         && feetInside
                         && isTarget(mc, target);
                 if (landedAtSurface && airborneSeen) {
@@ -292,7 +314,7 @@ public final class SmartParkour implements ClientModInitializer {
                 }
                 // Never select a new platform until centered on the one just landed on.
                 if (landingPlatform == null || !mc.player.onGround() ||
-                    Math.abs(mc.player.getY() - (landingPlatform.getY() + 1.0)) > 0.001 ||
+                    Math.abs(mc.player.getY() - (landingPlatform.getY() + 1.0)) > LANDING_Y_TOLERANCE ||
                     mc.player.getX() < landingPlatform.getX() || mc.player.getX() >= landingPlatform.getX() + 1 ||
                     mc.player.getZ() < landingPlatform.getZ() || mc.player.getZ() >= landingPlatform.getZ() + 1) {
                     reset(mc);
@@ -306,7 +328,7 @@ public final class SmartParkour implements ClientModInitializer {
                 double distance = Math.hypot(ex, ez);
                 double speed = Math.hypot(vel.x, vel.z);
                 // Brake residual momentum instead of oscillating around the center.
-                if (distance <= CENTER_TOLERANCE && speed < 0.035) {
+                if (withinCenter(pos.x, pos.z, landingPlatform) && speed < 0.035) {
                     releaseMovement(mc);
                     if (++centeredTicks >= 3) {
                         landingSneak = false;
@@ -368,6 +390,14 @@ public final class SmartParkour implements ClientModInitializer {
                 if (phaseTicks >= jumpDelayTicks) transition(State.IDLE);
             }
         }
+    }
+    private double maxApproachDisplacement(Vec3 pos, BlockPos block) {
+        return Math.max(Math.abs(pos.x - block.getX() - 0.5), Math.abs(pos.z - block.getZ() - 0.5));
+    }
+    private boolean withinCenter(double x, double z, BlockPos block) {
+        double tx = exactCenter ? 0.025 : centerToleranceXPixels / 16.0;
+        double tz = exactCenter ? 0.025 : centerToleranceZPixels / 16.0;
+        return Math.abs(x - block.getX() - 0.5) <= tx && Math.abs(z - block.getZ() - 0.5) <= tz;
     }
     private boolean homeReached(Minecraft mc) {
         Vec3 pos = mc.player.position();
@@ -546,6 +576,9 @@ public final class SmartParkour implements ClientModInitializer {
             approachStallLimitTicks = readTicks(props, "approachStallTicks", 5, 1, 100);
             facingConfirmTicks = readTicks(props, "facingConfirmTicks", 2, 1, 20);
             homeFacingConfirmTicks = readTicks(props, "homeFacingConfirmTicks", 2, 1, 20);
+            centerToleranceXPixels = readTicks(props, "centerToleranceXPixels", 3, 0, 8);
+            centerToleranceZPixels = readTicks(props, "centerToleranceZPixels", 3, 0, 8);
+            exactCenter = Boolean.parseBoolean(props.getProperty("exactCenter", "false"));
             inactivityRescue = Boolean.parseBoolean(props.getProperty("inactivityRescue", "false"));
             continueInMenus = Boolean.parseBoolean(props.getProperty("continueInMenus", "false"));
         } catch (Exception ex) {
@@ -567,6 +600,9 @@ public final class SmartParkour implements ClientModInitializer {
             props.setProperty("approachStallTicks", Integer.toString(approachStallLimitTicks));
             props.setProperty("facingConfirmTicks", Integer.toString(facingConfirmTicks));
             props.setProperty("homeFacingConfirmTicks", Integer.toString(homeFacingConfirmTicks));
+            props.setProperty("centerToleranceXPixels", Integer.toString(centerToleranceXPixels));
+            props.setProperty("centerToleranceZPixels", Integer.toString(centerToleranceZPixels));
+            props.setProperty("exactCenter", Boolean.toString(exactCenter));
             props.setProperty("inactivityRescue", Boolean.toString(inactivityRescue));
             props.setProperty("continueInMenus", Boolean.toString(continueInMenus));
             StringWriter writer = new StringWriter();
@@ -580,9 +616,11 @@ public final class SmartParkour implements ClientModInitializer {
         private EditBox xField, yField, zField;
         private Component error = Component.empty();
         private boolean timersPage = false;
+        private boolean centeringPage = false;
         SettingsScreen() { super(Component.literal("SmartParkour — настройки")); }
         @Override protected void init() {
             if (timersPage) { initTimers(); return; }
+            if (centeringPage) { initCentering(); return; }
             int center = this.width / 2;
             int y = this.height / 2 - 135;
             addRenderableWidget(new AbstractSliderButton(center - 110, y, 220, 20,
@@ -599,6 +637,10 @@ public final class SmartParkour implements ClientModInitializer {
             y += 30;
             addRenderableWidget(Button.builder(Component.literal("Все таймеры..."), b -> {
                 timersPage = true; clearWidgets(); init();
+            }).bounds(center - 110, y, 220, 20).build());
+            y += 28;
+            addRenderableWidget(Button.builder(Component.literal("Точность центрирования..."), b -> {
+                centeringPage = true; clearWidgets(); init();
             }).bounds(center - 110, y, 220, 20).build());
             y += 28;
             addRenderableWidget(Button.builder(Component.literal("Спасение от бездействия: " + (inactivityRescue ? "ВКЛ" : "ВЫКЛ")), button -> {
@@ -623,6 +665,32 @@ public final class SmartParkour implements ClientModInitializer {
             addRenderableWidget(zField);
             addRenderableWidget(Button.builder(Component.literal("Сохранить"), button -> saveAndClose())
                     .bounds(center - 110, y + 38, 220, 20).build());
+        }
+        private void initCentering() {
+            int cx = width / 2;
+            int y = height / 2 - 72;
+            addRenderableWidget(Button.builder(Component.literal("Точный центр: " + (exactCenter ? "ВКЛ" : "ВЫКЛ")), b -> {
+                exactCenter = !exactCenter;
+                b.setMessage(Component.literal("Точный центр: " + (exactCenter ? "ВКЛ" : "ВЫКЛ")));
+            }).bounds(cx - 110, y, 220, 20).build());
+            addPixelsSlider(cx, y + 30, "Допуск X", () -> centerToleranceXPixels, v -> centerToleranceXPixels = v);
+            addPixelsSlider(cx, y + 60, "Допуск Z", () -> centerToleranceZPixels, v -> centerToleranceZPixels = v);
+            addRenderableWidget(Button.builder(Component.literal("Назад / сохранить"), b -> {
+                saveConfig(); centeringPage = false; clearWidgets(); init();
+            }).bounds(cx - 110, y + 100, 220, 20).build());
+        }
+        private void addPixelsSlider(int cx, int y, String title,
+                                     java.util.function.IntSupplier getter, java.util.function.IntConsumer setter) {
+            addRenderableWidget(new AbstractSliderButton(cx - 110, y, 220, 20,
+                    Component.empty(), getter.getAsInt() / 8.0) {
+                { updateMessage(); }
+                @Override protected void updateMessage() {
+                    setMessage(Component.literal(title + ": ±" + getter.getAsInt() + " пикс."));
+                }
+                @Override protected void applyValue() {
+                    setter.accept((int)Math.round(value * 8)); updateMessage();
+                }
+            });
         }
         private void initTimers() {
             int cx = width / 2;

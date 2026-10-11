@@ -1,5 +1,5 @@
 plugins { id 'net.fabricmc.fabric-loom-remap' version '1.14-SNAPSHOT' }
-version = '0.9.8'
+version = '0.10.1'
 group = 'dev.smartparkour'
 repositories { mavenCentral() }
 dependencies {
