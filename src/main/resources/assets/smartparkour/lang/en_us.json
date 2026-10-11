@@ -14,5 +14,9 @@
   "option.smartparkour.save": "Save and close",
   "error.smartparkour.coordinates": "Invalid XYZ coordinates",
   "message.smartparkour.on": "SmartParkour: ON",
-  "message.smartparkour.off": "SmartParkour: OFF"
+  "message.smartparkour.off": "SmartParkour: OFF",
+  "option.smartparkour.adaptive": "Adaptive jumps",
+  "option.smartparkour.air_brake": "Air braking",
+  "option.smartparkour.recovery": "Recover after fall",
+  "option.smartparkour.recovery_delay": "Recovery pause: %s ms"
 }

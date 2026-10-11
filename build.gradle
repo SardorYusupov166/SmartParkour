@@ -1,5 +1,5 @@
 plugins { id 'fabric-loom' version '1.15-SNAPSHOT' }
-version = '0.7.0'
+version = '0.8.0'
 group = 'dev.smartparkour'
 base { archivesName = 'smartparkour' }
 repositories { maven { url = 'https://maven.fabricmc.net/' }; mavenCentral() }

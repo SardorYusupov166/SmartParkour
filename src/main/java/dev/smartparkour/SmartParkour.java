@@ -35,6 +35,13 @@ public final class SmartParkour implements ClientModInitializer {
     private int groundedTicks, waitingTicks, airborneTicks, brakeTicks;
     private double homeX = 0, homeY = 64, homeZ = 0;
     private boolean homeConfigured = false, fallbackUsed = false;
+    private Vec3d lastPosition;
+    private int recoveryTicks = 0, plateWaitTicks = 0, jumpPulseTicks = 0;
+    private boolean recoveryMode = false;
+    private double previousDistance = Double.MAX_VALUE;
+    private int stuckTicks = 0;
+    private boolean adaptiveJump = true, airBrake = true, autoRecovery = true;
+    private int recoveryDelayMs = 500;
 
     @Override public void onInitializeClient() {
         loadConfig();
@@ -62,7 +69,17 @@ public final class SmartParkour implements ClientModInitializer {
             c.player.sendMessage(net.minecraft.text.Text.translatable(enabled ? "message.smartparkour.on" : "message.smartparkour.off"), true);
         }
         previousToggle = pressed;
-        if (!enabled) return;
+        if (!enabled) { lastPosition = c.player.getEntityPos(); return; }
+        Vec3d now = c.player.getEntityPos();
+        if (lastPosition != null && now.squaredDistanceTo(lastPosition) > 64.0 && autoRecovery && fallbackEnabled && homeConfigured) {
+            // Server-side teleport after a fall. Clear previous run and head for plate.
+            visited.clear(); livePlatforms.clear(); nextPlatformId = 1;
+            target = null; takeoff = null; sawAirborne = false;
+            recoveryMode = true; fallbackUsed = false; recoveryTicks = 0;
+            plateWaitTicks = 0; stuckTicks = 0; previousDistance = Double.MAX_VALUE;
+            phase = Phase.FALLBACK; release(c);
+        }
+        lastPosition = now;
         updatePlatforms(c);
         boolean grounded = c.player.isOnGround();
         groundedTicks = grounded ? groundedTicks + 1 : 0;
@@ -79,7 +96,11 @@ public final class SmartParkour implements ClientModInitializer {
                 delayTicks = 0;
                 waitingTicks = 0;
                 fallbackUsed = false;
-            } else { reset(c); return; }
+            } else {
+                // A missed landing can precede a teleport. Don't reselect a target
+                // while falling; wait for server recovery or a stable ground state.
+                reset(c); return;
+            }
         }
         if (phase == Phase.BRAKE) {
             release(c);
@@ -129,34 +150,55 @@ public final class SmartParkour implements ClientModInitializer {
             waitingTicks = 0;
             return;
         }
-        if (phase == Phase.FALLBACK_DONE) { release(c); phase = Phase.WAIT; return; }
+        if (phase == Phase.FALLBACK_DONE) {
+            release(c);
+            // Keep standing on the plate until parkour platforms actually spawn.
+            if (hasOtherWool(c)) {
+                visited.clear(); markVisited(c.player.getBlockPos().down());
+                recoveryMode = false; phase = Phase.WAIT; waitingTicks = 0;
+            } else if (++plateWaitTicks > 400) {
+                // Stay put; never walk away from the pressure plate because of a timeout.
+                plateWaitTicks = 400;
+            }
+            return;
+        }
         if (phase == Phase.FALLBACK) {
             release(c);
             if (!grounded) return;
+            if (recoveryMode && recoveryTicks++ < (int)Math.ceil(recoveryDelayMs / 50.0)) return;
             Vec3d pos = c.player.getEntityPos();
             double dx = homeX - pos.x, dz = homeZ - pos.z;
-            if (Math.hypot(dx, dz) < .65 && Math.abs(homeY - pos.y) < 1.6) {
-                // Re-arm parkour at the fallback destination, not the same fallback trip.
-                visited.clear();
-                markVisited(c.player.getBlockPos().down());
-                fallbackUsed = true;
-                phase = Phase.FALLBACK_DONE;
-                return;
+            double distance = Math.hypot(dx, dz);
+            // Coordinates represent the pressure plate block, so allow half-block rounding.
+            if (distance < .28 && Math.abs(homeY - pos.y) < 1.35) {
+                visited.clear(); markVisited(c.player.getBlockPos().down());
+                fallbackUsed = true; plateWaitTicks = 0;
+                phase = Phase.FALLBACK_DONE; return;
             }
-            // Safe ground-only movement: no crossing gaps or obstacle pathfinding.
-            double len = Math.hypot(dx, dz);
-            if (len < .01) return;
+            if (distance < .001) return;
             aim(c, dx, dz);
-            float yawDiff = MathHelper.wrapDegrees((float)Math.toDegrees(Math.atan2(-dx, dz)) - c.player.getYaw());
-            if (Math.abs(yawDiff) > 7) return;
-            double stepX = dx / len * .65, stepZ = dz / len * .65;
-            BlockPos feet = c.player.getBlockPos();
+            float yawGoal = (float)Math.toDegrees(Math.atan2(-dx, dz));
+            if (Math.abs(MathHelper.wrapDegrees(yawGoal - c.player.getYaw())) > angleTolerance) return;
+            double stepX = dx / distance * Math.min(.65, distance), stepZ = dz / distance * Math.min(.65, distance);
             BlockPos ahead = BlockPos.ofFloored(pos.x + stepX, pos.y, pos.z + stepZ);
-            if (!c.world.getBlockState(ahead.down()).isSolidBlock(c.world, ahead.down()) ||
-                !c.world.getBlockState(ahead).getCollisionShape(c.world, ahead).isEmpty() ||
-                !c.world.getBlockState(ahead.up()).getCollisionShape(c.world, ahead.up()).isEmpty()) return;
-            if (Math.abs(c.player.getVelocity().x) + Math.abs(c.player.getVelocity().z) > .18) return;
-            c.options.forwardKey.setPressed(true);
+            BlockPos support = ahead.down();
+            boolean clearFeet = c.world.getBlockState(ahead).getCollisionShape(c.world, ahead).isEmpty();
+            boolean clearHead = c.world.getBlockState(ahead.up()).getCollisionShape(c.world, ahead.up()).isEmpty();
+            boolean groundAhead = c.world.getBlockState(support).isSolidBlock(c.world, support);
+            boolean oneHighStep = !clearFeet && clearHead &&
+                c.world.getBlockState(ahead.up(2)).getCollisionShape(c.world, ahead.up(2)).isEmpty() &&
+                c.world.getBlockState(ahead).isSolidBlock(c.world, ahead);
+            // No pathfinder: stop rather than walk into a gap or a two-block wall.
+            if (!groundAhead && !oneHighStep) return;
+            if (!clearHead) return;
+            double horizontalSpeed = Math.hypot(c.player.getVelocity().x, c.player.getVelocity().z);
+            if (distance < .65 && horizontalSpeed > .055) return;
+            c.options.forwardKey.setPressed(distance > .19);
+            if (oneHighStep && distance > .24) c.options.jumpKey.setPressed(true);
+            // Watchdog prevents endless walking into an unhandled obstacle.
+            if (distance >= previousDistance - .005) stuckTicks++; else stuckTicks = 0;
+            previousDistance = distance;
+            if (stuckTicks > 80) { release(c); return; }
             return;
         }
         if (phase == Phase.WAIT) {
@@ -205,13 +247,17 @@ public final class SmartParkour implements ClientModInitializer {
                 return;
             }
             c.options.forwardKey.setPressed(true);
-            c.options.sprintKey.setPressed(true);
+            // Nearby targets are easy to overshoot with sprint acceleration.
+            c.options.sprintKey.setPressed(!adaptiveJump || distance > 3.15);
             c.options.jumpKey.setPressed(false);
             c.options.leftKey.setPressed(false);
             c.options.rightKey.setPressed(false);
             c.options.backKey.setPressed(false);
             double edge = distanceToEdge(c, takeoff);
-            if (edge < 0.24 || (distance < 2.4 && speedToward > 0.12)) {
+            // For short jumps, launch early and avoid sprint. For longer jumps,
+            // build speed toward the edge. Jump is a one-tick pulse.
+            double triggerEdge = adaptiveJump && distance < 2.5 ? .43 : .24;
+            if (edge < triggerEdge || (distance < 2.4 && speedToward > 0.09)) {
                 c.options.jumpKey.setPressed(true);
                 phase = Phase.AIRBORNE;
                 sawAirborne = false;
@@ -225,12 +271,15 @@ public final class SmartParkour implements ClientModInitializer {
             double dx = target.getX() + .5 - p.x, dz = target.getZ() + .5 - p.z;
             aim(c, dx, dz);
             c.options.jumpKey.setPressed(false);
-            c.options.sprintKey.setPressed(true);
+            c.options.sprintKey.setPressed(!adaptiveJump || Math.hypot(dx, dz) > 2.0);
             // Brake near the landing center to reduce overshoot; steering is intentionally conservative.
             double along = Math.hypot(dx, dz);
             double projected = along > .01 ? (v.x * dx + v.z * dz) / along : 0;
-            c.options.forwardKey.setPressed(along > .32 && projected < .22);
-            c.options.backKey.setPressed(along < .25 && projected < -.08);
+            // Control the trajectory using actual horizontal velocity rather than
+            // holding forward throughout the entire flight.
+            double desired = adaptiveJump ? Math.min(.19, Math.max(.035, along * .075)) : .22;
+            c.options.forwardKey.setPressed(along > .22 && projected < desired);
+            c.options.backKey.setPressed(airBrake && along < .8 && projected < -.11);
             c.options.leftKey.setPressed(false);
             c.options.rightKey.setPressed(false);
         }
@@ -327,6 +376,10 @@ public final class SmartParkour implements ClientModInitializer {
             centerTolerance = Math.max(.05, Math.min(.35, Double.parseDouble(props.getProperty("centerTolerance", "0.15"))));
             rotationSpeed = (float)Math.max(5, Math.min(90, Double.parseDouble(props.getProperty("rotationSpeed", "20"))));
             angleTolerance = (float)Math.max(1, Math.min(15, Double.parseDouble(props.getProperty("angleTolerance", "3"))));
+            adaptiveJump = Boolean.parseBoolean(props.getProperty("adaptiveJump", "true"));
+            airBrake = Boolean.parseBoolean(props.getProperty("airBrake", "true"));
+            autoRecovery = Boolean.parseBoolean(props.getProperty("autoRecovery", "true"));
+            recoveryDelayMs = Math.max(0, Math.min(3000, Integer.parseInt(props.getProperty("recoveryDelayMs", "500"))));
             homeX = Double.parseDouble(props.getProperty("x", "0"));
             homeY = Double.parseDouble(props.getProperty("y", "64"));
             homeZ = Double.parseDouble(props.getProperty("z", "0"));
@@ -348,8 +401,12 @@ public final class SmartParkour implements ClientModInitializer {
         props.setProperty("centerTolerance", Double.toString(centerTolerance));
         props.setProperty("rotationSpeed", Float.toString(rotationSpeed));
         props.setProperty("angleTolerance", Float.toString(angleTolerance));
+        props.setProperty("adaptiveJump", Boolean.toString(adaptiveJump));
+        props.setProperty("airBrake", Boolean.toString(airBrake));
+        props.setProperty("autoRecovery", Boolean.toString(autoRecovery));
+        props.setProperty("recoveryDelayMs", Integer.toString(recoveryDelayMs));
         try (java.io.Writer w = java.nio.file.Files.newBufferedWriter(net.fabricmc.loader.api.FabricLoader.getInstance().getConfigDir().resolve("smartparkour.properties"))) {
-            props.store(w, "SmartParkour 0.7.0 settings");
+            props.store(w, "SmartParkour 0.8.0 settings");
         } catch (Exception e) { System.err.println("SmartParkour save failed: " + e); }
     }
 
@@ -360,7 +417,7 @@ public final class SmartParkour implements ClientModInitializer {
         private Text tr(String key, Object... args) { return Text.translatable("option.smartparkour." + key, args); }
         private Text toggle(String key, boolean value) { return tr(key).copy().append(": ").append(Text.translatable(value ? "option.smartparkour.on" : "option.smartparkour.off")); }
         @Override protected void init() {
-            int cx = width / 2, y = Math.max(30, height / 2 - 125);
+            int cx = width / 2, y = Math.max(24, height / 2 - 170);
             addDrawableChild(ButtonWidget.builder(toggle("fallback", fallbackEnabled), b -> {
                 fallbackEnabled = !fallbackEnabled; b.setMessage(toggle("fallback", fallbackEnabled));
             }).dimensions(cx - 155, y, 150, 20).build());
@@ -392,6 +449,22 @@ public final class SmartParkour implements ClientModInitializer {
                 angleTolerance = angleTolerance >= 15 ? 1 : angleTolerance + 1;
                 b.setMessage(tr("angle", (int)angleTolerance));
             }).dimensions(cx + 5, y, 150, 20).build());
+            y += 24;
+            addDrawableChild(ButtonWidget.builder(toggle("adaptive", adaptiveJump), b -> {
+                adaptiveJump = !adaptiveJump; b.setMessage(toggle("adaptive", adaptiveJump));
+            }).dimensions(cx - 155, y, 150, 20).build());
+            addDrawableChild(ButtonWidget.builder(toggle("air_brake", airBrake), b -> {
+                airBrake = !airBrake; b.setMessage(toggle("air_brake", airBrake));
+            }).dimensions(cx + 5, y, 150, 20).build());
+            y += 24;
+            addDrawableChild(ButtonWidget.builder(toggle("recovery", autoRecovery), b -> {
+                autoRecovery = !autoRecovery; b.setMessage(toggle("recovery", autoRecovery));
+            }).dimensions(cx - 155, y, 310, 20).build());
+            y += 24;
+            addDrawableChild(ButtonWidget.builder(tr("recovery_delay", recoveryDelayMs), b -> {
+                recoveryDelayMs = recoveryDelayMs >= 3000 ? 0 : recoveryDelayMs + 250;
+                b.setMessage(tr("recovery_delay", recoveryDelayMs));
+            }).dimensions(cx - 155, y, 310, 20).build());
             y += 27;
             xField = new TextFieldWidget(textRenderer, cx - 155, y, 98, 20, Text.literal("X")); xField.setText(Double.toString(homeX)); addDrawableChild(xField);
             yField = new TextFieldWidget(textRenderer, cx - 49, y, 98, 20, Text.literal("Y")); yField.setText(Double.toString(homeY)); addDrawableChild(yField);
@@ -418,7 +491,7 @@ public final class SmartParkour implements ClientModInitializer {
         }
         @Override public void render(net.minecraft.client.gui.DrawContext context, int mouseX, int mouseY, float delta) {
             super.render(context, mouseX, mouseY, delta);
-            context.drawCenteredTextWithShadow(textRenderer, Text.literal("SmartParkour v0.7.0 | P / O"), width / 2, Math.max(15, height / 2 - 143), 0xFFFFFF);
+            context.drawCenteredTextWithShadow(textRenderer, Text.literal("SmartParkour v0.8.0 | P / O"), width / 2, Math.max(15, height / 2 - 143), 0xFFFFFF);
             if (!error.isEmpty()) context.drawCenteredTextWithShadow(textRenderer, Text.translatable(error), width / 2, height / 2 + 118, 0xFF5555);
         }
     }
@@ -431,6 +504,7 @@ public final class SmartParkour implements ClientModInitializer {
         airborneTicks = 0;
         phase = Phase.WAIT;
         sawAirborne = false;
+        lastPosition = c.player == null ? null : c.player.getEntityPos();
         release(c);
     }
     private static void release(MinecraftClient c) {

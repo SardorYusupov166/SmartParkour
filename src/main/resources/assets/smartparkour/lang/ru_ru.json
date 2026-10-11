@@ -14,5 +14,9 @@
   "option.smartparkour.save": "Сохранить и закрыть",
   "error.smartparkour.coordinates": "Неверные координаты XYZ",
   "message.smartparkour.on": "SmartParkour: ВКЛ",
-  "message.smartparkour.off": "SmartParkour: ВЫКЛ"
+  "message.smartparkour.off": "SmartParkour: ВЫКЛ",
+  "option.smartparkour.adaptive": "Адаптивные прыжки",
+  "option.smartparkour.air_brake": "Торможение в воздухе",
+  "option.smartparkour.recovery": "Автовозврат после падения",
+  "option.smartparkour.recovery_delay": "Пауза возврата: %s мс"
 }
