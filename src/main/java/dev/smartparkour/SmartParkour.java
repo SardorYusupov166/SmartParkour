@@ -57,7 +57,7 @@ public final class SmartParkour implements ClientModInitializer {
         if (target == null || !validTarget(c, target)) { reset(c); return; }
         if (phase == Phase.APPROACH) {
             if (!grounded) { phase = Phase.AIRBORNE; airborneTicks = 0; return; }
-            Vec3d position = c.player.getPos();
+            Vec3d position = c.player.getEntityPos();
             Vec3d destination = Vec3d.ofCenter(target).add(0, 0.5, 0);
             double dx = destination.x - position.x, dz = destination.z - position.z;
             double distance = Math.hypot(dx, dz);
@@ -80,7 +80,7 @@ public final class SmartParkour implements ClientModInitializer {
         } else if (phase == Phase.AIRBORNE) {
             airborneTicks++;
             if (airborneTicks > 35) { reset(c); return; }
-            Vec3d p = c.player.getPos();
+            Vec3d p = c.player.getEntityPos();
             Vec3d v = c.player.getVelocity();
             double dx = target.getX() + .5 - p.x, dz = target.getZ() + .5 - p.z;
             aim(c, dx, dz);
@@ -129,7 +129,7 @@ public final class SmartParkour implements ClientModInitializer {
 
     private static double distanceToEdge(MinecraftClient c, BlockPos b) {
         if (b == null) return 0;
-        Vec3d p = c.player.getPos();
+        Vec3d p = c.player.getEntityPos();
         double x = Math.min(p.x - b.getX(), b.getX() + 1 - p.x);
         double z = Math.min(p.z - b.getZ(), b.getZ() + 1 - p.z);
         return Math.min(x, z);
