@@ -16,7 +16,7 @@ import org.lwjgl.glfw.GLFW;
 
 /** Experimental client-only controller for one-block, gray-wool dynamic parkour. */
 public final class SmartParkour implements ClientModInitializer {
-    private enum Phase { WAIT, BRAKE, CENTER, DELAY, APPROACH, AIRBORNE, FALLBACK, FALLBACK_DONE }
+    private enum Phase { WAIT, BRAKE, CENTER, DELAY, AIM, APPROACH, AIRBORNE, FALLBACK, FALLBACK_DONE }
     // Every observed gray-wool appearance has its own identity. A vanished block
     // can reappear at the same coordinates and is then a fresh candidate.
     private final java.util.Map<BlockPos, Long> livePlatforms = new java.util.HashMap<>();
@@ -29,6 +29,7 @@ public final class SmartParkour implements ClientModInitializer {
     private boolean fullStop = true, centerBeforeJump = true, fallbackEnabled = false;
     private int landingDelayMs = 350, delayTicks = 0;
     private double centerTolerance = 0.15;
+    private float rotationSpeed = 20f, angleTolerance = 3f;
     private Phase phase = Phase.WAIT;
     private BlockPos target, takeoff;
     private int groundedTicks, waitingTicks, airborneTicks, brakeTicks;
@@ -58,7 +59,7 @@ public final class SmartParkour implements ClientModInitializer {
                 updatePlatforms(c);
                 markVisited(c.player.getBlockPos().down());
             }
-            c.player.sendMessage(net.minecraft.text.Text.literal("SmartParkour: " + (enabled ? "ON" : "OFF")), true);
+            c.player.sendMessage(net.minecraft.text.Text.translatable(enabled ? "message.smartparkour.on" : "message.smartparkour.off"), true);
         }
         previousToggle = pressed;
         if (!enabled) return;
@@ -170,7 +171,22 @@ public final class SmartParkour implements ClientModInitializer {
             }
             target = next;
             takeoff = c.player.getBlockPos().down();
-            phase = Phase.APPROACH;
+            phase = Phase.AIM;
+            release(c);
+            return;
+        }
+        if (phase == Phase.AIM) {
+            release(c);
+            if (!grounded || groundedTicks < 3) return;
+            Vec3d position = c.player.getEntityPos();
+            double dx = target.getX() + .5 - position.x, dz = target.getZ() + .5 - position.z;
+            aim(c, dx, dz);
+            float yawGoal = (float)Math.toDegrees(Math.atan2(-dx, dz));
+            if (Math.abs(MathHelper.wrapDegrees(yawGoal - c.player.getYaw())) <= angleTolerance) {
+                phase = Phase.APPROACH;
+                release(c);
+            }
+            return;
         }
         if (target == null || !validTarget(c, target)) { reset(c); return; }
         if (phase == Phase.APPROACH) {
@@ -181,8 +197,13 @@ public final class SmartParkour implements ClientModInitializer {
             double distance = Math.hypot(dx, dz);
             double vx = c.player.getVelocity().x, vz = c.player.getVelocity().z;
             double speedToward = distance > 0.01 ? (vx * dx + vz * dz) / distance : 0;
-            // Rotate to the target and build forward velocity. Jump before leaving the edge.
-            aim(c, dx, dz);
+            // Re-aim only if alignment is lost; never move while turning significantly.
+            float desiredYaw = (float)Math.toDegrees(Math.atan2(-dx, dz));
+            if (Math.abs(MathHelper.wrapDegrees(desiredYaw - c.player.getYaw())) > angleTolerance) {
+                release(c);
+                phase = Phase.AIM;
+                return;
+            }
             c.options.forwardKey.setPressed(true);
             c.options.sprintKey.setPressed(true);
             c.options.jumpKey.setPressed(false);
@@ -272,10 +293,10 @@ public final class SmartParkour implements ClientModInitializer {
             && c.world.getBlockState(b.up(2)).getCollisionShape(c.world, b.up(2)).isEmpty();
     }
 
-    private static void aim(MinecraftClient c, double dx, double dz) {
+    private void aim(MinecraftClient c, double dx, double dz) {
         float yaw = (float)(Math.toDegrees(Math.atan2(-dx, dz)));
         float current = c.player.getYaw();
-        c.player.setYaw(current + MathHelper.clamp(MathHelper.wrapDegrees(yaw - current), -22f, 22f));
+        c.player.setYaw(current + MathHelper.clamp(MathHelper.wrapDegrees(yaw - current), -rotationSpeed, rotationSpeed));
     }
 
     private static double distanceToEdge(MinecraftClient c, BlockPos b) {
@@ -304,6 +325,8 @@ public final class SmartParkour implements ClientModInitializer {
             centerBeforeJump = Boolean.parseBoolean(props.getProperty("centerBeforeJump", "true"));
             landingDelayMs = Math.max(0, Math.min(1500, Integer.parseInt(props.getProperty("landingDelayMs", "350"))));
             centerTolerance = Math.max(.05, Math.min(.35, Double.parseDouble(props.getProperty("centerTolerance", "0.15"))));
+            rotationSpeed = (float)Math.max(5, Math.min(90, Double.parseDouble(props.getProperty("rotationSpeed", "20"))));
+            angleTolerance = (float)Math.max(1, Math.min(15, Double.parseDouble(props.getProperty("angleTolerance", "3"))));
             homeX = Double.parseDouble(props.getProperty("x", "0"));
             homeY = Double.parseDouble(props.getProperty("y", "64"));
             homeZ = Double.parseDouble(props.getProperty("z", "0"));
@@ -323,49 +346,58 @@ public final class SmartParkour implements ClientModInitializer {
         props.setProperty("centerBeforeJump", Boolean.toString(centerBeforeJump));
         props.setProperty("landingDelayMs", Integer.toString(landingDelayMs));
         props.setProperty("centerTolerance", Double.toString(centerTolerance));
+        props.setProperty("rotationSpeed", Float.toString(rotationSpeed));
+        props.setProperty("angleTolerance", Float.toString(angleTolerance));
         try (java.io.Writer w = java.nio.file.Files.newBufferedWriter(net.fabricmc.loader.api.FabricLoader.getInstance().getConfigDir().resolve("smartparkour.properties"))) {
-            props.store(w, "SmartParkour 0.6.0 settings");
+            props.store(w, "SmartParkour 0.7.0 settings");
         } catch (Exception e) { System.err.println("SmartParkour save failed: " + e); }
     }
 
     private final class SettingsScreen extends Screen {
         private TextFieldWidget xField, yField, zField;
         private String error = "";
-        SettingsScreen() { super(Text.literal("SmartParkour v0.6.0")); }
+        SettingsScreen() { super(Text.translatable("screen.smartparkour.title")); }
+        private Text tr(String key, Object... args) { return Text.translatable("option.smartparkour." + key, args); }
+        private Text toggle(String key, boolean value) { return tr(key).copy().append(": ").append(Text.translatable(value ? "option.smartparkour.on" : "option.smartparkour.off")); }
         @Override protected void init() {
-            int cx = width / 2, y = height / 2 - 105;
-            addDrawableChild(ButtonWidget.builder(Text.literal("Fallback: " + (fallbackEnabled ? "ON" : "OFF")), b -> {
-                fallbackEnabled = !fallbackEnabled;
-                b.setMessage(Text.literal("Fallback: " + (fallbackEnabled ? "ON" : "OFF")));
+            int cx = width / 2, y = Math.max(30, height / 2 - 125);
+            addDrawableChild(ButtonWidget.builder(toggle("fallback", fallbackEnabled), b -> {
+                fallbackEnabled = !fallbackEnabled; b.setMessage(toggle("fallback", fallbackEnabled));
             }).dimensions(cx - 155, y, 150, 20).build());
-            addDrawableChild(ButtonWidget.builder(Text.literal("Full stop: " + (fullStop ? "ON" : "OFF")), b -> {
-                fullStop = !fullStop;
-                b.setMessage(Text.literal("Full stop: " + (fullStop ? "ON" : "OFF")));
+            addDrawableChild(ButtonWidget.builder(toggle("full_stop", fullStop), b -> {
+                fullStop = !fullStop; b.setMessage(toggle("full_stop", fullStop));
             }).dimensions(cx + 5, y, 150, 20).build());
-            y += 25;
-            addDrawableChild(ButtonWidget.builder(Text.literal("Center before jump: " + (centerBeforeJump ? "ON" : "OFF")), b -> {
-                centerBeforeJump = !centerBeforeJump;
-                b.setMessage(Text.literal("Center before jump: " + (centerBeforeJump ? "ON" : "OFF")));
+            y += 24;
+            addDrawableChild(ButtonWidget.builder(toggle("center", centerBeforeJump), b -> {
+                centerBeforeJump = !centerBeforeJump; b.setMessage(toggle("center", centerBeforeJump));
             }).dimensions(cx - 155, y, 310, 20).build());
-            y += 25;
-            addDrawableChild(ButtonWidget.builder(Text.literal("Landing delay: " + landingDelayMs + " ms (-50)"), b -> {
-                landingDelayMs = Math.max(0, landingDelayMs - 50);
-                b.setMessage(Text.literal("Landing delay: " + landingDelayMs + " ms (-50)"));
+            y += 24;
+            addDrawableChild(ButtonWidget.builder(tr("delay", landingDelayMs), b -> {
+                landingDelayMs = Math.max(0, landingDelayMs - 50); b.setMessage(tr("delay", landingDelayMs));
             }).dimensions(cx - 155, y, 150, 20).build());
-            addDrawableChild(ButtonWidget.builder(Text.literal("Delay +50 ms"), b -> {
+            addDrawableChild(ButtonWidget.builder(tr("delay_plus"), b -> {
                 landingDelayMs = Math.min(1500, landingDelayMs + 50);
             }).dimensions(cx + 5, y, 150, 20).build());
-            y += 25;
-            addDrawableChild(ButtonWidget.builder(Text.literal("Center tolerance: " + String.format(java.util.Locale.ROOT, "%.2f", centerTolerance)), b -> {
+            y += 24;
+            addDrawableChild(ButtonWidget.builder(tr("tolerance", String.format(java.util.Locale.ROOT, "%.2f", centerTolerance)), b -> {
                 centerTolerance = centerTolerance >= .35 ? .05 : Math.round((centerTolerance + .05) * 100.0) / 100.0;
-                b.setMessage(Text.literal("Center tolerance: " + String.format(java.util.Locale.ROOT, "%.2f", centerTolerance)));
+                b.setMessage(tr("tolerance", String.format(java.util.Locale.ROOT, "%.2f", centerTolerance)));
             }).dimensions(cx - 155, y, 310, 20).build());
-            y += 28;
+            y += 24;
+            addDrawableChild(ButtonWidget.builder(tr("rotation_speed", (int)rotationSpeed), b -> {
+                rotationSpeed = rotationSpeed >= 90 ? 5 : rotationSpeed + 5;
+                b.setMessage(tr("rotation_speed", (int)rotationSpeed));
+            }).dimensions(cx - 155, y, 150, 20).build());
+            addDrawableChild(ButtonWidget.builder(tr("angle", (int)angleTolerance), b -> {
+                angleTolerance = angleTolerance >= 15 ? 1 : angleTolerance + 1;
+                b.setMessage(tr("angle", (int)angleTolerance));
+            }).dimensions(cx + 5, y, 150, 20).build());
+            y += 27;
             xField = new TextFieldWidget(textRenderer, cx - 155, y, 98, 20, Text.literal("X")); xField.setText(Double.toString(homeX)); addDrawableChild(xField);
             yField = new TextFieldWidget(textRenderer, cx - 49, y, 98, 20, Text.literal("Y")); yField.setText(Double.toString(homeY)); addDrawableChild(yField);
             zField = new TextFieldWidget(textRenderer, cx + 57, y, 98, 20, Text.literal("Z")); zField.setText(Double.toString(homeZ)); addDrawableChild(zField);
-            y += 25;
-            addDrawableChild(ButtonWidget.builder(Text.literal("Use my position"), b -> {
+            y += 24;
+            addDrawableChild(ButtonWidget.builder(tr("use_position"), b -> {
                 if (client != null && client.player != null) {
                     Vec3d p = client.player.getEntityPos();
                     xField.setText(Double.toString(Math.floor(p.x) + .5));
@@ -373,22 +405,21 @@ public final class SmartParkour implements ClientModInitializer {
                     zField.setText(Double.toString(Math.floor(p.z) + .5));
                 }
             }).dimensions(cx - 155, y, 310, 20).build());
-            y += 25;
-            addDrawableChild(ButtonWidget.builder(Text.literal("Save and close"), b -> {
+            y += 24;
+            addDrawableChild(ButtonWidget.builder(tr("save"), b -> {
                 try {
                     homeX = Double.parseDouble(xField.getText()); homeY = Double.parseDouble(yField.getText()); homeZ = Double.parseDouble(zField.getText());
                     if (!Double.isFinite(homeX) || !Double.isFinite(homeY) || !Double.isFinite(homeZ)) throw new NumberFormatException();
                     homeConfigured = fallbackEnabled;
                     saveConfig();
                     if (client != null) client.setScreen(null);
-                } catch (NumberFormatException e) { error = "Invalid XYZ coordinates"; }
+                } catch (NumberFormatException e) { error = "error.smartparkour.coordinates"; }
             }).dimensions(cx - 155, y, 310, 20).build());
         }
         @Override public void render(net.minecraft.client.gui.DrawContext context, int mouseX, int mouseY, float delta) {
             super.render(context, mouseX, mouseY, delta);
-            context.drawCenteredTextWithShadow(textRenderer, "SmartParkour v0.6.0 | P: settings | O: toggle", width / 2, height / 2 - 121, 0xFFFFFF);
-            context.drawCenteredTextWithShadow(textRenderer, "X                         Y                         Z", width / 2, height / 2 + 7, 0xFFFFFF);
-            if (!error.isEmpty()) context.drawCenteredTextWithShadow(textRenderer, error, width / 2, height / 2 + 110, 0xFF5555);
+            context.drawCenteredTextWithShadow(textRenderer, Text.literal("SmartParkour v0.7.0 | P / O"), width / 2, Math.max(15, height / 2 - 143), 0xFFFFFF);
+            if (!error.isEmpty()) context.drawCenteredTextWithShadow(textRenderer, Text.translatable(error), width / 2, height / 2 + 118, 0xFF5555);
         }
     }
 

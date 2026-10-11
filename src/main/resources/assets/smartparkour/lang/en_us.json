@@ -1,0 +1,18 @@
+{
+  "screen.smartparkour.title": "SmartParkour settings",
+  "option.smartparkour.on": "ON",
+  "option.smartparkour.off": "OFF",
+  "option.smartparkour.fallback": "Fallback",
+  "option.smartparkour.full_stop": "Full stop",
+  "option.smartparkour.center": "Center before jump",
+  "option.smartparkour.delay": "Delay: %s ms (-50)",
+  "option.smartparkour.delay_plus": "Delay +50 ms",
+  "option.smartparkour.tolerance": "Center tolerance: %s",
+  "option.smartparkour.rotation_speed": "Turn speed: %s°/tick",
+  "option.smartparkour.angle": "Angle tolerance: %s°",
+  "option.smartparkour.use_position": "Use my position",
+  "option.smartparkour.save": "Save and close",
+  "error.smartparkour.coordinates": "Invalid XYZ coordinates",
+  "message.smartparkour.on": "SmartParkour: ON",
+  "message.smartparkour.off": "SmartParkour: OFF"
+}

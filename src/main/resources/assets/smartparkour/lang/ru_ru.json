@@ -1,0 +1,18 @@
+{
+  "screen.smartparkour.title": "Настройки SmartParkour",
+  "option.smartparkour.on": "ВКЛ",
+  "option.smartparkour.off": "ВЫКЛ",
+  "option.smartparkour.fallback": "Резервный маршрут",
+  "option.smartparkour.full_stop": "Полная остановка",
+  "option.smartparkour.center": "В центр перед прыжком",
+  "option.smartparkour.delay": "Пауза: %s мс (-50)",
+  "option.smartparkour.delay_plus": "Пауза +50 мс",
+  "option.smartparkour.tolerance": "Точность центра: %s",
+  "option.smartparkour.rotation_speed": "Поворот: %s°/тик",
+  "option.smartparkour.angle": "Точность угла: %s°",
+  "option.smartparkour.use_position": "Запомнить мою позицию",
+  "option.smartparkour.save": "Сохранить и закрыть",
+  "error.smartparkour.coordinates": "Неверные координаты XYZ",
+  "message.smartparkour.on": "SmartParkour: ВКЛ",
+  "message.smartparkour.off": "SmartParkour: ВЫКЛ"
+}
