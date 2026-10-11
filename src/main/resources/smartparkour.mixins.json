@@ -1,0 +1,11 @@
+{
+  "required": true,
+  "package": "dev.smartparkour.mixin",
+  "compatibilityLevel": "JAVA_21",
+  "client": [
+    "PauseScreenMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}

@@ -66,6 +66,8 @@ public final class SmartParkour implements ClientModInitializer {
     private static final int CENTER_TIMEOUT_TICKS = 20;
     private static final int INACTIVITY_TIMEOUT_TICKS = 100;
     private boolean inactivityRescue = false;
+    private static volatile boolean continueInMenus = false;
+    public static boolean shouldContinueInMenus() { return continueInMenus; }
     private int inactivityTicks;
     private Vec3 lastWatchPosition;
     private State lastWatchState;
@@ -98,11 +100,11 @@ public final class SmartParkour implements ClientModInitializer {
             clearRoute();
             missingTargetTicks = 0;
             returningHome = false;
-            if (mc.player != null) mc.player.displayClientMessage(Component.literal("SmartParkour 0.9.6: " + (enabled ? "ON" : "OFF")), true);
+            if (mc.player != null) mc.player.displayClientMessage(Component.literal("SmartParkour 0.9.7: " + (enabled ? "ON" : "OFF")), true);
         }
         toggleWasDown = down;
         if (!enabled || mc.player == null || mc.level == null) return;
-        if (mc.screen != null) { release(mc); clearInactivityWatch(); return; }
+        if (mc.screen != null && !continueInMenus) { release(mc); clearInactivityWatch(); return; }
         if (inactivityRescue && checkInactivity(mc)) {
             reset(mc);
             mc.player.displayClientMessage(Component.literal("SmartParkour: перезапуск после 5 секунд бездействия"), true);
@@ -523,6 +525,7 @@ public final class SmartParkour implements ClientModInitializer {
             home = new BlockPos(x, y, z);
             jumpDelayTicks = Math.max(0, Math.min(100, Integer.parseInt(props.getProperty("delayTicks", "10"))));
             inactivityRescue = Boolean.parseBoolean(props.getProperty("inactivityRescue", "false"));
+            continueInMenus = Boolean.parseBoolean(props.getProperty("continueInMenus", "false"));
         } catch (Exception ex) {
             System.err.println("SmartParkour: cannot read config: " + ex.getMessage());
         }
@@ -536,6 +539,7 @@ public final class SmartParkour implements ClientModInitializer {
             props.setProperty("homeZ", Integer.toString(home.getZ()));
             props.setProperty("delayTicks", Integer.toString(jumpDelayTicks));
             props.setProperty("inactivityRescue", Boolean.toString(inactivityRescue));
+            props.setProperty("continueInMenus", Boolean.toString(continueInMenus));
             StringWriter writer = new StringWriter();
             props.store(writer, "SmartParkour settings");
             Files.writeString(configPath, writer.toString(), StandardCharsets.UTF_8);
@@ -566,6 +570,11 @@ public final class SmartParkour implements ClientModInitializer {
                 inactivityRescue = !inactivityRescue;
                 clearInactivityWatch();
                 button.setMessage(Component.literal("Спасение от бездействия: " + (inactivityRescue ? "ВКЛ" : "ВЫКЛ")));
+            }).bounds(center - 110, y, 220, 20).build());
+            y += 28;
+            addRenderableWidget(Button.builder(Component.literal("Паркур в меню: " + (continueInMenus ? "ВКЛ" : "ВЫКЛ")), button -> {
+                continueInMenus = !continueInMenus;
+                button.setMessage(Component.literal("Паркур в меню: " + (continueInMenus ? "ВКЛ" : "ВЫКЛ")));
             }).bounds(center - 110, y, 220, 20).build());
             y += 38;
             xField = new EditBox(this.font, center - 110, y, 68, 20, Component.literal("X"));

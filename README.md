@@ -1,15 +1,12 @@
-# SmartParkour 0.9.5 — Center Timeout
+# SmartParkour 0.9.7 — Continue in menus
 
 Minecraft Java 1.21.11 / Fabric.
 
-- Landing centering has a hard 20-client-tick (~1 second at 20 TPS) timeout.
-- If centering succeeds sooner, the original stable-center behavior remains.
-- If time runs out, simulated movement and sneak are released, and the mod continues into the normal between-jumps delay from the player’s actual position.
-- The timeout is per CENTER phase and is not reset by minor motion.
-- All other behavior from 0.9.4 is retained.
+- **O**: toggle parkour (when no screen is open).
+- **P**: open settings (when no screen is open).
+- **Continue parkour in menus**: new toggle, off by default. Saved in `config/smartparkour.properties` as `continueInMenus`.
+- With the option enabled, the controller continues processing movement while GUI screens are open. The vanilla pause screen is also prevented from pausing singleplayer ticks via a client mixin.
+- With the option disabled, automation releases controls when a screen opens.
+- Settings screen remains non-pausing; opening it still resets the current jump plan. Controls continue if the toggle is enabled.
 
-Not verified with Gradle or an in-game test.
-
-
-## 0.9.6 — Спасение от бездействия
-В меню P добавлен переключатель «Спасение от бездействия» (по умолчанию выключен). При отсутствии движения, смены платформы или состояния в течение 100 клиентских тиков алгоритм сбрасывается и начинает поиск заново. Намеренная пауза между прыжками не считается зависанием. Значение хранится в `config/smartparkour.properties`.
+**Limitations:** No live Minecraft/Gradle test has been performed. Vanilla screen input handling may affect simulated movement in some GUIs. The keybinds O/P are intentionally handled only in normal gameplay to avoid typing conflicts.
