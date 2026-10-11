@@ -204,6 +204,11 @@ public final class SmartParkour implements ClientModInitializer {
                 boolean closeJump = dist <= CLOSE_JUMP_DISTANCE;
                 boolean jump = closeJump || approachStallTicks >= APPROACH_STALL_TICKS ||
                         remain <= Math.max(.10, mc.player.getDeltaMovement().horizontalDistance() * 1.35);
+                // Do not walk off the departure block while waiting for takeoff.
+                // At the edge, force the takeoff on this tick.
+                double maxLocal = Math.max(Math.abs(pos.x - (under.getX() + .5)),
+                                           Math.abs(pos.z - (under.getZ() + .5)));
+                if (maxLocal >= .43) jump = true;
                 steer(mc, ux, uz, sprint, jump);
                 if (jump) { jumpLatch = true; transition(State.FLIGHT); }
             }
@@ -456,11 +461,14 @@ public final class SmartParkour implements ClientModInitializer {
         // No KeyMapping.setDown: prevents the 0.7 stuck-key bug when disabling.
         double yaw = Math.toRadians(mc.player.getYRot());
         double forward = -Math.sin(yaw) * dx + Math.cos(yaw) * dz;
-        double right = Math.cos(yaw) * dx + Math.sin(yaw) * dz;
-        mc.options.keyUp.setDown(forward > .08);
-        mc.options.keyDown.setDown(forward < -.08);
-        mc.options.keyRight.setDown(right > .08);
-        mc.options.keyLeft.setDown(right < -.08);
+        double right = -Math.cos(yaw) * dx - Math.sin(yaw) * dz;
+        // Normalize to avoid a movement dead zone for short correction vectors.
+        double magnitude = Math.hypot(forward, right);
+        if (magnitude > 1.0e-5) { forward /= magnitude; right /= magnitude; }
+        mc.options.keyUp.setDown(forward > .15);
+        mc.options.keyDown.setDown(forward < -.15);
+        mc.options.keyRight.setDown(right > .15);
+        mc.options.keyLeft.setDown(right < -.15);
         mc.options.keySprint.setDown(sprint);
         mc.options.keyJump.setDown(jump);
     }

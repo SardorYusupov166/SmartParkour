@@ -1,16 +1,10 @@
-# SmartParkour 0.9.7 — Continue in menus
+# SmartParkour 0.9.9 — Movement Fix
 
 Minecraft Java 1.21.11 / Fabric.
 
-- **O**: toggle parkour (when no screen is open).
-- **P**: open settings (when no screen is open).
-- **Continue parkour in menus**: new toggle, off by default. Saved in `config/smartparkour.properties` as `continueInMenus`.
-- With the option enabled, the controller continues processing movement while GUI screens are open. The vanilla pause screen is also prevented from pausing singleplayer ticks via a client mixin.
-- With the option disabled, automation releases controls when a screen opens.
-- Settings screen remains non-pausing; opening it still resets the current jump plan. Controls continue if the toggle is enabled.
+- Fixed sign of camera-relative strafing in `steer()` (A/D).
+- Normalized steering direction to avoid dead zones for short vectors.
+- Added a departure-edge emergency takeoff threshold.
+- Preserved existing target lock, adaptive jumps, landing, centering, return-home, configuration, O/P hotkeys and menu behavior.
 
-**Limitations:** No live Minecraft/Gradle test has been performed. Vanilla screen input handling may affect simulated movement in some GUIs. The keybinds O/P are intentionally handled only in normal gameplay to avoid typing conflicts.
-
-
-## 0.9.8 Mixin hotfix
-Target the declaring Screen.isPauseScreen method instead of inherited PauseScreen method; only change behavior for PauseScreen. Not yet compiled or tested in Minecraft.
+**Not yet Gradle-built or in-game tested.** Test diagonal jumps and near-edge takeoffs before unattended use.
