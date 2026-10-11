@@ -5,6 +5,10 @@ import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.client.MinecraftClient;
+import net.minecraft.client.gui.screen.Screen;
+import net.minecraft.client.gui.widget.ButtonWidget;
+import net.minecraft.client.gui.widget.TextFieldWidget;
+import net.minecraft.text.Text;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.math.Vec3d;
@@ -12,7 +16,7 @@ import org.lwjgl.glfw.GLFW;
 
 /** Experimental client-only controller for one-block, gray-wool dynamic parkour. */
 public final class SmartParkour implements ClientModInitializer {
-    private enum Phase { WAIT, BRAKE, APPROACH, AIRBORNE, FALLBACK, FALLBACK_DONE }
+    private enum Phase { WAIT, BRAKE, CENTER, DELAY, APPROACH, AIRBORNE, FALLBACK, FALLBACK_DONE }
     // Every observed gray-wool appearance has its own identity. A vanished block
     // can reappear at the same coordinates and is then a fresh candidate.
     private final java.util.Map<BlockPos, Long> livePlatforms = new java.util.HashMap<>();
@@ -21,7 +25,10 @@ public final class SmartParkour implements ClientModInitializer {
     private boolean sawAirborne = false;
     // Two indistinguishable platforms appearing simultaneously have no knowable order.
 
-    private boolean enabled, previousToggle;
+    private boolean enabled, previousToggle, previousMenu;
+    private boolean fullStop = true, centerBeforeJump = true, fallbackEnabled = false;
+    private int landingDelayMs = 350, delayTicks = 0;
+    private double centerTolerance = 0.15;
     private Phase phase = Phase.WAIT;
     private BlockPos target, takeoff;
     private int groundedTicks, waitingTicks, airborneTicks, brakeTicks;
@@ -35,7 +42,11 @@ public final class SmartParkour implements ClientModInitializer {
 
     private void tick(MinecraftClient c) {
         if (c.player == null || c.world == null) { enabled = false; return; }
-        boolean pressed = GLFW.glfwGetKey(c.getWindow().getHandle(), GLFW.GLFW_KEY_R) == GLFW.GLFW_PRESS;
+        boolean menuPressed = GLFW.glfwGetKey(c.getWindow().getHandle(), GLFW.GLFW_KEY_P) == GLFW.GLFW_PRESS;
+        if (menuPressed && !previousMenu && c.currentScreen == null) { release(c); c.setScreen(new SettingsScreen()); }
+        previousMenu = menuPressed;
+        if (c.currentScreen != null) { release(c); return; }
+        boolean pressed = GLFW.glfwGetKey(c.getWindow().getHandle(), GLFW.GLFW_KEY_O) == GLFW.GLFW_PRESS;
         if (pressed && !previousToggle) {
             enabled = !enabled;
             reset(c);
@@ -62,8 +73,9 @@ public final class SmartParkour implements ClientModInitializer {
                 takeoff = target;
                 markVisited(target);
                 target = null;
-                phase = Phase.BRAKE;
+                phase = fullStop ? Phase.BRAKE : (centerBeforeJump ? Phase.CENTER : Phase.DELAY);
                 brakeTicks = 0;
+                delayTicks = 0;
                 waitingTicks = 0;
                 fallbackUsed = false;
             } else { reset(c); return; }
@@ -87,8 +99,34 @@ public final class SmartParkour implements ClientModInitializer {
             }
             if (++brakeTicks < 4) return;
             release(c);
+            phase = centerBeforeJump ? Phase.CENTER : Phase.DELAY;
+            delayTicks = 0;
+        }
+        if (phase == Phase.CENTER) {
+            release(c);
+            if (!grounded) return;
+            BlockPos platform = c.player.getBlockPos().down();
+            if (!c.world.getBlockState(platform).isOf(Blocks.GRAY_WOOL)) { phase = Phase.DELAY; delayTicks = 0; return; }
+            Vec3d p = c.player.getEntityPos();
+            double dx = platform.getX() + .5 - p.x, dz = platform.getZ() + .5 - p.z;
+            if (Math.hypot(dx, dz) <= centerTolerance && Math.hypot(c.player.getVelocity().x, c.player.getVelocity().z) < .045) {
+                phase = Phase.DELAY; delayTicks = 0; return;
+            }
+            // Low-speed positioning: never drive toward the edge when near the center.
+            if (Math.hypot(dx, dz) > centerTolerance && Math.hypot(c.player.getVelocity().x, c.player.getVelocity().z) < .07) {
+                aim(c, dx, dz);
+                if (Math.abs(MathHelper.wrapDegrees((float)Math.toDegrees(Math.atan2(-dx, dz)) - c.player.getYaw())) < 8)
+                    c.options.forwardKey.setPressed(true);
+            }
+            return;
+        }
+        if (phase == Phase.DELAY) {
+            release(c);
+            if (!grounded) return;
+            if (++delayTicks <= (int)Math.ceil(landingDelayMs / 50.0)) return;
             phase = Phase.WAIT;
             waitingTicks = 0;
+            return;
         }
         if (phase == Phase.FALLBACK_DONE) { release(c); phase = Phase.WAIT; return; }
         if (phase == Phase.FALLBACK) {
@@ -127,7 +165,7 @@ public final class SmartParkour implements ClientModInitializer {
             BlockPos next = findTarget(c);
             if (next == null) {
                 // Never leave for fallback while another gray-wool platform exists.
-                if (homeConfigured && !fallbackUsed && waitingTicks >= 10 && !hasOtherWool(c)) phase = Phase.FALLBACK;
+                if (fallbackEnabled && homeConfigured && !fallbackUsed && waitingTicks >= 10 && !hasOtherWool(c)) phase = Phase.FALLBACK;
                 return;
             }
             target = next;
@@ -256,17 +294,101 @@ public final class SmartParkour implements ClientModInitializer {
             if (!java.nio.file.Files.exists(file)) {
                 java.nio.file.Files.writeString(file,
                     "# Set enabled=true and your destination coordinates to enable ground-only fallback\n" +
-                    "enabled=false\nx=0\ny=64\nz=0\n");
+                    "enabled=false\nx=0\ny=64\nz=0\nfullStop=true\ncenterBeforeJump=true\nlandingDelayMs=350\ncenterTolerance=0.15\n");
             }
             java.util.Properties props = new java.util.Properties();
             try (java.io.Reader reader = java.nio.file.Files.newBufferedReader(file)) { props.load(reader); }
             homeConfigured = Boolean.parseBoolean(props.getProperty("enabled", "false"));
+            fallbackEnabled = homeConfigured;
+            fullStop = Boolean.parseBoolean(props.getProperty("fullStop", "true"));
+            centerBeforeJump = Boolean.parseBoolean(props.getProperty("centerBeforeJump", "true"));
+            landingDelayMs = Math.max(0, Math.min(1500, Integer.parseInt(props.getProperty("landingDelayMs", "350"))));
+            centerTolerance = Math.max(.05, Math.min(.35, Double.parseDouble(props.getProperty("centerTolerance", "0.15"))));
             homeX = Double.parseDouble(props.getProperty("x", "0"));
             homeY = Double.parseDouble(props.getProperty("y", "64"));
             homeZ = Double.parseDouble(props.getProperty("z", "0"));
         } catch (Exception e) {
             homeConfigured = false;
             System.err.println("SmartParkour: invalid config: " + e.getMessage());
+        }
+    }
+
+    private void saveConfig() {
+        java.util.Properties props = new java.util.Properties();
+        props.setProperty("enabled", Boolean.toString(fallbackEnabled));
+        props.setProperty("x", Double.toString(homeX));
+        props.setProperty("y", Double.toString(homeY));
+        props.setProperty("z", Double.toString(homeZ));
+        props.setProperty("fullStop", Boolean.toString(fullStop));
+        props.setProperty("centerBeforeJump", Boolean.toString(centerBeforeJump));
+        props.setProperty("landingDelayMs", Integer.toString(landingDelayMs));
+        props.setProperty("centerTolerance", Double.toString(centerTolerance));
+        try (java.io.Writer w = java.nio.file.Files.newBufferedWriter(net.fabricmc.loader.api.FabricLoader.getInstance().getConfigDir().resolve("smartparkour.properties"))) {
+            props.store(w, "SmartParkour 0.6.0 settings");
+        } catch (Exception e) { System.err.println("SmartParkour save failed: " + e); }
+    }
+
+    private final class SettingsScreen extends Screen {
+        private TextFieldWidget xField, yField, zField;
+        private String error = "";
+        SettingsScreen() { super(Text.literal("SmartParkour v0.6.0")); }
+        @Override protected void init() {
+            int cx = width / 2, y = height / 2 - 105;
+            addDrawableChild(ButtonWidget.builder(Text.literal("Fallback: " + (fallbackEnabled ? "ON" : "OFF")), b -> {
+                fallbackEnabled = !fallbackEnabled;
+                b.setMessage(Text.literal("Fallback: " + (fallbackEnabled ? "ON" : "OFF")));
+            }).dimensions(cx - 155, y, 150, 20).build());
+            addDrawableChild(ButtonWidget.builder(Text.literal("Full stop: " + (fullStop ? "ON" : "OFF")), b -> {
+                fullStop = !fullStop;
+                b.setMessage(Text.literal("Full stop: " + (fullStop ? "ON" : "OFF")));
+            }).dimensions(cx + 5, y, 150, 20).build());
+            y += 25;
+            addDrawableChild(ButtonWidget.builder(Text.literal("Center before jump: " + (centerBeforeJump ? "ON" : "OFF")), b -> {
+                centerBeforeJump = !centerBeforeJump;
+                b.setMessage(Text.literal("Center before jump: " + (centerBeforeJump ? "ON" : "OFF")));
+            }).dimensions(cx - 155, y, 310, 20).build());
+            y += 25;
+            addDrawableChild(ButtonWidget.builder(Text.literal("Landing delay: " + landingDelayMs + " ms (-50)"), b -> {
+                landingDelayMs = Math.max(0, landingDelayMs - 50);
+                b.setMessage(Text.literal("Landing delay: " + landingDelayMs + " ms (-50)"));
+            }).dimensions(cx - 155, y, 150, 20).build());
+            addDrawableChild(ButtonWidget.builder(Text.literal("Delay +50 ms"), b -> {
+                landingDelayMs = Math.min(1500, landingDelayMs + 50);
+            }).dimensions(cx + 5, y, 150, 20).build());
+            y += 25;
+            addDrawableChild(ButtonWidget.builder(Text.literal("Center tolerance: " + String.format(java.util.Locale.ROOT, "%.2f", centerTolerance)), b -> {
+                centerTolerance = centerTolerance >= .35 ? .05 : Math.round((centerTolerance + .05) * 100.0) / 100.0;
+                b.setMessage(Text.literal("Center tolerance: " + String.format(java.util.Locale.ROOT, "%.2f", centerTolerance)));
+            }).dimensions(cx - 155, y, 310, 20).build());
+            y += 28;
+            xField = new TextFieldWidget(textRenderer, cx - 155, y, 98, 20, Text.literal("X")); xField.setText(Double.toString(homeX)); addDrawableChild(xField);
+            yField = new TextFieldWidget(textRenderer, cx - 49, y, 98, 20, Text.literal("Y")); yField.setText(Double.toString(homeY)); addDrawableChild(yField);
+            zField = new TextFieldWidget(textRenderer, cx + 57, y, 98, 20, Text.literal("Z")); zField.setText(Double.toString(homeZ)); addDrawableChild(zField);
+            y += 25;
+            addDrawableChild(ButtonWidget.builder(Text.literal("Use my position"), b -> {
+                if (client != null && client.player != null) {
+                    Vec3d p = client.player.getEntityPos();
+                    xField.setText(Double.toString(Math.floor(p.x) + .5));
+                    yField.setText(Double.toString(Math.floor(p.y)));
+                    zField.setText(Double.toString(Math.floor(p.z) + .5));
+                }
+            }).dimensions(cx - 155, y, 310, 20).build());
+            y += 25;
+            addDrawableChild(ButtonWidget.builder(Text.literal("Save and close"), b -> {
+                try {
+                    homeX = Double.parseDouble(xField.getText()); homeY = Double.parseDouble(yField.getText()); homeZ = Double.parseDouble(zField.getText());
+                    if (!Double.isFinite(homeX) || !Double.isFinite(homeY) || !Double.isFinite(homeZ)) throw new NumberFormatException();
+                    homeConfigured = fallbackEnabled;
+                    saveConfig();
+                    if (client != null) client.setScreen(null);
+                } catch (NumberFormatException e) { error = "Invalid XYZ coordinates"; }
+            }).dimensions(cx - 155, y, 310, 20).build());
+        }
+        @Override public void render(net.minecraft.client.gui.DrawContext context, int mouseX, int mouseY, float delta) {
+            super.render(context, mouseX, mouseY, delta);
+            context.drawCenteredTextWithShadow(textRenderer, "SmartParkour v0.6.0 | P: settings | O: toggle", width / 2, height / 2 - 121, 0xFFFFFF);
+            context.drawCenteredTextWithShadow(textRenderer, "X                         Y                         Z", width / 2, height / 2 + 7, 0xFFFFFF);
+            if (!error.isEmpty()) context.drawCenteredTextWithShadow(textRenderer, error, width / 2, height / 2 + 110, 0xFF5555);
         }
     }
 

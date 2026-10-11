@@ -1,21 +1,26 @@
-# SmartParkour 0.5 (experimental)
+# SmartParkour v0.6.0 (experimental)
 
-Fabric 1.21.11 client-only source. Requires Java 21 and Fabric API.
+Fabric client mod for Minecraft 1.21.11.
 
-## New in 0.5
-- Scans loaded nearby blocks for `minecraft:gray_wool` each tick.
-- Tracks each continuous appearance of a gray-wool block with an internal ID.
-- A visited platform is excluded only for its current appearance; if it disappears and later reappears at the same coordinates it receives a new ID.
-- Stops after landing before choosing the next jump (inherited 0.4 logic).
-- Optional ground-only fallback to coordinates via `config/smartparkour.properties`; when reached, returns to parkour mode.
-- If another gray-wool block is visible but unreachable, waits rather than starting fallback.
+## Controls
+- **P**: settings menu (while in game)
+- **O**: enable/disable automation (R is no longer used)
 
-## Important limitations
-- When two identical platforms are already present, their intended order cannot be inferred reliably. The mod uses a distance heuristic and may skip a required platform.
-- This is an untested experimental controller; compile and test carefully. It may miss jumps or move off edges. Use on a test course first.
-- If a platform vanishes and respawns within a single client tick, polling may not distinguish the replacement.
-- Fallback movement is ground-only and has no obstacle pathfinding.
-- Key R toggles the mod and may conflict with shader reload bindings.
+## Settings
+- Fallback on/off and destination XYZ, with **Use my position**
+- Full stop after landing on/off
+- Center on gray wool before next jump on/off
+- Landing delay in 50ms steps, default 350ms
+- Center tolerance, default 0.15 blocks
+- Save and close writes `config/smartparkour.properties` immediately
 
-## Build
-Upload the contents (including `.github/workflows/build.yml`) to GitHub and check Actions. The workflow builds and uploads `build/libs/*.jar`. The build has not been verified here.
+**Important:** Build is untested against the live Minecraft/Yarn environment. The parkour routing is experimental; equal gray-wool platforms appearing simultaneously cannot be reliably ordered. Centering can fail in narrow/dynamic situations; disable it if it causes trouble. No void traversal is guaranteed.
+
+## GitHub Actions
+Upload all files preserving directory structure. Existing `.github/workflows/build.yml` can remain unchanged. In Actions download the compiled `smartparkour-0.6.0.jar` (not sources).
+
+## Changelog
+- 0.6.0: in-game settings, adjustable landing delay, full stop and centering toggles, P/O keys, persistent config, version display.
+- 0.5.0: platform appearance identities, coordinate reuse.
+- 0.4.0: visited platform tracking.
+- 0.3.0: landing stop and fallback navigation.
