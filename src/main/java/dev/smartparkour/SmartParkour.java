@@ -100,7 +100,7 @@ public final class SmartParkour implements ClientModInitializer {
             clearRoute();
             missingTargetTicks = 0;
             returningHome = false;
-            if (mc.player != null) mc.player.displayClientMessage(Component.literal("SmartParkour 0.9.7: " + (enabled ? "ON" : "OFF")), true);
+            if (mc.player != null) mc.player.displayClientMessage(Component.literal("SmartParkour 0.9.8: " + (enabled ? "ON" : "OFF")), true);
         }
         toggleWasDown = down;
         if (!enabled || mc.player == null || mc.level == null) return;

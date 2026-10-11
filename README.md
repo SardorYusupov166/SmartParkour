@@ -10,3 +10,7 @@ Minecraft Java 1.21.11 / Fabric.
 - Settings screen remains non-pausing; opening it still resets the current jump plan. Controls continue if the toggle is enabled.
 
 **Limitations:** No live Minecraft/Gradle test has been performed. Vanilla screen input handling may affect simulated movement in some GUIs. The keybinds O/P are intentionally handled only in normal gameplay to avoid typing conflicts.
+
+
+## 0.9.8 Mixin hotfix
+Target the declaring Screen.isPauseScreen method instead of inherited PauseScreen method; only change behavior for PauseScreen. Not yet compiled or tested in Minecraft.
