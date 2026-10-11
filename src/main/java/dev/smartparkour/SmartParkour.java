@@ -63,6 +63,7 @@ public final class SmartParkour implements ClientModInitializer {
     private boolean toggleWasDown;
     private BlockPos landingPlatform;
     private int centeredTicks;
+    private static final int CENTER_TIMEOUT_TICKS = 20;
 
     @Override public void onInitializeClient() {
         loadConfig();
@@ -91,7 +92,7 @@ public final class SmartParkour implements ClientModInitializer {
             clearRoute();
             missingTargetTicks = 0;
             returningHome = false;
-            if (mc.player != null) mc.player.displayClientMessage(Component.literal("SmartParkour 0.9.4: " + (enabled ? "ON" : "OFF")), true);
+            if (mc.player != null) mc.player.displayClientMessage(Component.literal("SmartParkour 0.9.5: " + (enabled ? "ON" : "OFF")), true);
         }
         toggleWasDown = down;
         if (!enabled || mc.player == null || mc.level == null) return;
@@ -257,6 +258,17 @@ public final class SmartParkour implements ClientModInitializer {
                 }
             }
             case CENTER -> {
+                // Centering is best-effort. After 20 client ticks, continue from
+                // the actual landing position instead of getting stuck forever.
+                if (phaseTicks >= CENTER_TIMEOUT_TICKS) {
+                    releaseMovement(mc);
+                    landingSneak = false;
+                    mc.options.keyShift.setDown(false);
+                    landingPlatform = null;
+                    centeredTicks = 0;
+                    transition(State.LAND);
+                    return;
+                }
                 // Never select a new platform until centered on the one just landed on.
                 if (landingPlatform == null || !mc.player.onGround() ||
                     Math.abs(mc.player.getY() - (landingPlatform.getY() + 1.0)) > 0.001 ||
