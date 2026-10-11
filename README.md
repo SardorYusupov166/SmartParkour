@@ -1,4 +1,4 @@
-# SmartParkour 0.8.3 (Fabric 1.21.11)
+# SmartParkour 0.8.4 (Fabric 1.21.11)
 
 - **O**: toggle auto parkour on/off.
 - **P**: open settings screen.

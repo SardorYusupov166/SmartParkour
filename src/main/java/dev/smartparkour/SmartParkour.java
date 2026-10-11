@@ -30,6 +30,7 @@ public final class SmartParkour implements ClientModInitializer {
     private BlockPos target;
     private int phaseTicks;
     private boolean jumpLatch;
+    private boolean toggleWasDown;
 
     @Override public void onInitializeClient() {
         toggle = KeyBindingHelper.registerKeyBinding(new KeyMapping("key.smartparkour.toggle", InputConstants.Type.KEYSYM, GLFW.GLFW_KEY_O, KeyMapping.Category.MISC));
@@ -45,11 +46,17 @@ public final class SmartParkour implements ClientModInitializer {
                 mc.setScreen(new SettingsScreen());
             }
         }
-        while (toggle.consumeClick()) {
+        // Handle both queued clicks and the rising edge of the bound key.
+        // Some key conflicts or GUI transitions can consume a queued click.
+        boolean clicked = false;
+        while (toggle.consumeClick()) clicked = true;
+        boolean down = toggle.isDown();
+        if (mc.screen == null && (clicked || (down && !toggleWasDown))) {
             enabled = !enabled;
             reset(mc);
-            if (mc.player != null) mc.player.displayClientMessage(Component.literal("SmartParkour 0.8.3: " + (enabled ? "ON" : "OFF")), true);
+            if (mc.player != null) mc.player.displayClientMessage(Component.literal("SmartParkour 0.8.4: " + (enabled ? "ON" : "OFF")), true);
         }
+        toggleWasDown = down;
         if (!enabled || mc.player == null || mc.level == null) return;
         if (mc.screen != null) { release(mc); return; }
         if (!mc.player.onGround()) {
@@ -131,7 +138,7 @@ public final class SmartParkour implements ClientModInitializer {
     }
     private void look(Minecraft mc, double x, double z) {
         Vec3 pos = mc.player.position();
-        mc.player.setYRot((float)(Math.toDegrees(Math.atan2(z - pos.z, x - pos.x)) - 90));
+        mc.player.setYRot((float)(Math.toDegrees(Math.atan2(-(x - pos.x), z - pos.z))));
     }
     private void steer(Minecraft mc, double dx, double dz, boolean sprint, boolean jump) {
         // No KeyMapping.setDown: prevents the 0.7 stuck-key bug when disabling.
