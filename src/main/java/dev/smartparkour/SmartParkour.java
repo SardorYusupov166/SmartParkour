@@ -64,6 +64,12 @@ public final class SmartParkour implements ClientModInitializer {
     private BlockPos landingPlatform;
     private int centeredTicks;
     private static final int CENTER_TIMEOUT_TICKS = 20;
+    private static final int INACTIVITY_TIMEOUT_TICKS = 100;
+    private boolean inactivityRescue = false;
+    private int inactivityTicks;
+    private Vec3 lastWatchPosition;
+    private State lastWatchState;
+    private BlockPos lastWatchPlatform;
 
     @Override public void onInitializeClient() {
         loadConfig();
@@ -92,11 +98,16 @@ public final class SmartParkour implements ClientModInitializer {
             clearRoute();
             missingTargetTicks = 0;
             returningHome = false;
-            if (mc.player != null) mc.player.displayClientMessage(Component.literal("SmartParkour 0.9.5: " + (enabled ? "ON" : "OFF")), true);
+            if (mc.player != null) mc.player.displayClientMessage(Component.literal("SmartParkour 0.9.6: " + (enabled ? "ON" : "OFF")), true);
         }
         toggleWasDown = down;
         if (!enabled || mc.player == null || mc.level == null) return;
-        if (mc.screen != null) { release(mc); return; }
+        if (mc.screen != null) { release(mc); clearInactivityWatch(); return; }
+        if (inactivityRescue && checkInactivity(mc)) {
+            reset(mc);
+            mc.player.displayClientMessage(Component.literal("SmartParkour: перезапуск после 5 секунд бездействия"), true);
+            return;
+        }
         // A jump target is immutable until landing, failure or explicit cancellation.
         if (!mc.player.onGround() && state != State.FLIGHT && state != State.LAND && state != State.CENTER) {
             if (target != null) transition(State.FLIGHT);
@@ -474,7 +485,32 @@ public final class SmartParkour implements ClientModInitializer {
         landingSneak = false;
         jumpLatch = false;
     }
-    private void reset(Minecraft mc) { release(mc); returningHome = false; missingTargetTicks = 0; state = State.IDLE; target = null; departure = null; landingPlatform = null; centeredTicks = 0; facingTicks = 0; airborneSeen = false; phaseTicks = 0; clearRoute(); }
+    private void clearInactivityWatch() {
+        inactivityTicks = 0;
+        lastWatchPosition = null;
+        lastWatchState = null;
+        lastWatchPlatform = null;
+    }
+    private boolean checkInactivity(Minecraft mc) {
+        Vec3 now = mc.player.position();
+        BlockPos platform = mc.player.onGround() ? mc.player.blockPosition().below() : null;
+        // Deliberate waiting between jumps is not a stuck condition.
+        if (state == State.LAND || state == State.IDLE && target == null && !returningHome) {
+            clearInactivityWatch();
+        } else if (lastWatchPosition == null || lastWatchState != state ||
+                   !java.util.Objects.equals(lastWatchPlatform, platform) ||
+                   now.distanceToSqr(lastWatchPosition) > 0.0004) {
+            inactivityTicks = 0;
+        } else if (++inactivityTicks >= INACTIVITY_TIMEOUT_TICKS) {
+            clearInactivityWatch();
+            return true;
+        }
+        lastWatchPosition = now;
+        lastWatchState = state;
+        lastWatchPlatform = platform;
+        return false;
+    }
+    private void reset(Minecraft mc) { clearInactivityWatch(); release(mc); returningHome = false; missingTargetTicks = 0; state = State.IDLE; target = null; departure = null; landingPlatform = null; centeredTicks = 0; facingTicks = 0; airborneSeen = false; phaseTicks = 0; clearRoute(); }
     private void transition(State next) { if (next != State.APPROACH || state != State.APPROACH) { approachStallTicks = 0; lastApproachPosition = null; } state = next; phaseTicks = 0; if (next == State.ROTATE) facingTicks = 0; if (next == State.FLIGHT) { airborneSeen = false; landingSneak = false; } }
     private void loadConfig() {
         if (!Files.isRegularFile(configPath)) return;
@@ -486,6 +522,7 @@ public final class SmartParkour implements ClientModInitializer {
             int z = Integer.parseInt(props.getProperty("homeZ", "306"));
             home = new BlockPos(x, y, z);
             jumpDelayTicks = Math.max(0, Math.min(100, Integer.parseInt(props.getProperty("delayTicks", "10"))));
+            inactivityRescue = Boolean.parseBoolean(props.getProperty("inactivityRescue", "false"));
         } catch (Exception ex) {
             System.err.println("SmartParkour: cannot read config: " + ex.getMessage());
         }
@@ -498,6 +535,7 @@ public final class SmartParkour implements ClientModInitializer {
             props.setProperty("homeY", Integer.toString(home.getY()));
             props.setProperty("homeZ", Integer.toString(home.getZ()));
             props.setProperty("delayTicks", Integer.toString(jumpDelayTicks));
+            props.setProperty("inactivityRescue", Boolean.toString(inactivityRescue));
             StringWriter writer = new StringWriter();
             props.store(writer, "SmartParkour settings");
             Files.writeString(configPath, writer.toString(), StandardCharsets.UTF_8);
@@ -511,7 +549,7 @@ public final class SmartParkour implements ClientModInitializer {
         SettingsScreen() { super(Component.literal("SmartParkour — настройки")); }
         @Override protected void init() {
             int center = this.width / 2;
-            int y = this.height / 2 - 72;
+            int y = this.height / 2 - 90;
             addRenderableWidget(new AbstractSliderButton(center - 110, y, 220, 20,
                     Component.empty(), jumpDelayTicks / 100.0) {
                 { updateMessage(); }
@@ -523,6 +561,12 @@ public final class SmartParkour implements ClientModInitializer {
                     updateMessage();
                 }
             });
+            y += 30;
+            addRenderableWidget(Button.builder(Component.literal("Спасение от бездействия: " + (inactivityRescue ? "ВКЛ" : "ВЫКЛ")), button -> {
+                inactivityRescue = !inactivityRescue;
+                clearInactivityWatch();
+                button.setMessage(Component.literal("Спасение от бездействия: " + (inactivityRescue ? "ВКЛ" : "ВЫКЛ")));
+            }).bounds(center - 110, y, 220, 20).build());
             y += 38;
             xField = new EditBox(this.font, center - 110, y, 68, 20, Component.literal("X"));
             yField = new EditBox(this.font, center - 34, y, 68, 20, Component.literal("Y"));
