@@ -1,24 +1,14 @@
-# SmartParkour 0.8.0 (experimental)
+# SmartParkour 0.8.0 — source prototype
 
-Fabric client mod for Minecraft 1.21.11. Java 21.
+Minecraft Java 1.21.11 / Fabric / Java 21.
 
-## Keys
-- P: settings
-- O: toggle automation
+P toggles automation. This is a **source prototype, not a tested mod jar**.
 
-## New in 0.8
-- Adaptive jump input based on target distance; optional midair braking.
-- Detect large position changes (server teleport) and begin recovery to configured pressure plate XYZ.
-- Simple ground walking and one-block jump toward the plate; no general pathfinding.
-- Wait on the plate for gray-wool platforms before restarting.
-- Russian and English settings labels, version 0.8.0.
+Build: `gradle build` with Gradle 9 and internet access; resulting mod should be in `build/libs` after a successful build.
 
-## Important limitations
-- No guarantee of successful landing; actual movement depends on server physics and latency.
-- Recovery works only for a safe, straightforward route. If the route is blocked, the controller stops rather than crossing a gap.
-- A teleport shorter than 8 blocks is not automatically recognized.
-- Pressure plate coordinates are the player position at the plate (use the in-game position button while standing on it).
-- If identical gray wool platforms appear simultaneously, their intended order cannot be inferred reliably.
-- Source is not yet verified with a full Gradle build or in-game test.
-
-Upload to GitHub keeping directories intact; existing .github/workflows/build.yml can be reused.
+Known limitations:
+- Exact Minecraft 1.21.11 API compatibility and dependency versions need verification by a real build.
+- No start-plate coordinates or automatic reset yet.
+- The nearest gray wool target heuristic can select the wrong block if unrelated gray wool is nearby.
+- No physically simulated trajectory yet; 3-gap jumps and diagonal jumps need in-game tuning.
+- Input override is temporary and restored on stop; screen transitions should be tested.
