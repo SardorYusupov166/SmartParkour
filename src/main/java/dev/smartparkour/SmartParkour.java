@@ -25,7 +25,7 @@ import com.mojang.blaze3d.platform.InputConstants;
 
 /** Fresh 0.8 controller. No teleportation, no persistent key overrides. */
 public final class SmartParkour implements ClientModInitializer {
-    private enum State { IDLE, ROTATE, VERIFY, ALIGN, APPROACH, FLIGHT, CENTER, LAND, RETURN_ROTATE, RETURN_MOVE }
+    private enum State { IDLE, ROTATE, VERIFY, ALIGN, APPROACH, FLIGHT, CENTER, LAND, RETURN_WARP, WALK_TO_PLATE, WAIT_FOR_START }
     private boolean landingSneak;
     private BlockPos home = new BlockPos(-65, 84, 306);
     private final Path configPath = FabricLoader.getInstance().getConfigDir().resolve("smartparkour.properties");
@@ -33,6 +33,15 @@ public final class SmartParkour implements ClientModInitializer {
     private int missingTargetTicks;
     private int homeFacingTicks;
     private boolean returningHome;
+    private Vec3 warpOrigin;
+    private boolean warpCommandSent;
+    private int warpCooldownTicks;
+    private int warpWaitTicks = 160;
+    private int walkToPlateTimeoutTicks = 240;
+    private int startWaitTicks = 100;
+    private Vec3 lastPlatePosition;
+    private int plateStuckTicks;
+    private boolean warpDetected;
     private static final double EDGE_MARGIN = 0.13;
     // If a target is close enough to collide with the approach, jump from center.
     private static final double CLOSE_JUMP_DISTANCE = 2.05;
@@ -106,12 +115,13 @@ public final class SmartParkour implements ClientModInitializer {
             clearRoute();
             missingTargetTicks = 0;
             returningHome = false;
-            if (mc.player != null) mc.player.displayClientMessage(Component.literal("SmartParkour 0.10.1: " + (enabled ? "ON" : "OFF")), true);
+            if (mc.player != null) mc.player.displayClientMessage(Component.literal("SmartParkour 0.10.3: " + (enabled ? "ON" : "OFF")), true);
         }
         toggleWasDown = down;
         if (!enabled || mc.player == null || mc.level == null) return;
+        if (warpCooldownTicks > 0) warpCooldownTicks--;
         if (mc.screen != null && !continueInMenus) { release(mc); clearInactivityWatch(); return; }
-        if (inactivityRescue && checkInactivity(mc)) {
+        if (inactivityRescue && state != State.RETURN_WARP && state != State.WALK_TO_PLATE && state != State.WAIT_FOR_START && warpCooldownTicks == 0 && checkInactivity(mc)) {
             // Re-plan from the current platform before deciding to go home.
             BlockPos here = mc.player.blockPosition().below();
             BlockPos alternative = mc.player.onGround() && isTarget(mc, here) ? findTarget(mc) : null;
@@ -123,7 +133,7 @@ public final class SmartParkour implements ClientModInitializer {
                 mc.player.displayClientMessage(Component.literal("SmartParkour: найден новый прыжок"), true);
             } else if (mc.player.onGround()) {
                 returningHome = true;
-                transition(State.RETURN_ROTATE);
+                transition(State.RETURN_WARP);
                 mc.player.displayClientMessage(Component.literal("SmartParkour: прыжков нет, возврат домой"), true);
             }
             return;
@@ -133,17 +143,17 @@ public final class SmartParkour implements ClientModInitializer {
             if (target != null) transition(State.FLIGHT);
             else { release(mc); return; }
         }
-        if (++phaseTicks > phaseTimeoutTicks && state != State.RETURN_ROTATE && state != State.RETURN_MOVE) { reset(mc); return; }
+        if (++phaseTicks > phaseTimeoutTicks && state != State.RETURN_WARP && state != State.WALK_TO_PLATE && state != State.WAIT_FOR_START) { reset(mc); return; }
         // Do not interrupt an airborne jump or the landing/centering sequence.
         if (state == State.IDLE && mc.player.onGround()) {
             BlockPos standing = mc.player.blockPosition().below();
             if (findTarget(mc) == null) {
-                if (++missingTargetTicks >= noTargetTicks) {
+                if (warpCooldownTicks == 0 && ++missingTargetTicks >= noTargetTicks) {
                     if (!returningHome) mc.player.displayClientMessage(Component.literal("SmartParkour: возврат к " + home.getX() + " " + home.getY() + " " + home.getZ()), true);
                     returningHome = true;
                     target = null;
                     departure = null;
-                    transition(State.RETURN_ROTATE);
+                    transition(State.RETURN_WARP);
                 }
             } else {
                 missingTargetTicks = 0;
@@ -347,43 +357,90 @@ public final class SmartParkour implements ClientModInitializer {
                     mc.options.keyShift.setDown(false);
                 }
             }
-            case RETURN_ROTATE -> {
+            case RETURN_WARP -> {
                 release(mc);
-                if (homeReached(mc)) { homeComplete(mc); return; }
-                if (findTarget(mc) != null && isTarget(mc, mc.player.blockPosition().below())) {
-                    missingTargetTicks = 0; returningHome = false; transition(State.IDLE); return;
+                if (!warpCommandSent) {
+                    if (mc.player.connection == null) return;
+                    warpOrigin = mc.player.position();
+                    warpCommandSent = true;
+                    warpDetected = false;
+                    mc.player.connection.sendCommand("warp parkour");
+                    mc.player.displayClientMessage(Component.literal("SmartParkour: /warp parkour отправлена"), true);
+                    return;
                 }
-                if (!mc.player.onGround()) return;
-                look(mc, home.getX() + .5, home.getZ() + .5);
-                if (isFacingPoint(mc, home.getX() + .5, home.getZ() + .5)) {
-                    if (++homeFacingTicks >= homeFacingConfirmTicks) transition(State.RETURN_MOVE);
-                } else homeFacingTicks = 0;
+                // Detect a server teleport by a discontinuous change in position.
+                // The warp arrival is NEAR the pressure plate, not on it.
+                if (warpOrigin != null && mc.player.position().distanceToSqr(warpOrigin) > 9.0) {
+                    warpDetected = true;
+                    lastPlatePosition = mc.player.position();
+                    plateStuckTicks = 0;
+                    transition(State.WALK_TO_PLATE);
+                    mc.player.displayClientMessage(Component.literal("SmartParkour: варп выполнен, иду к плите"), true);
+                } else if (phaseTicks >= warpWaitTicks) {
+                    // Do not send the command repeatedly or fall into a warp loop.
+                    mc.player.displayClientMessage(Component.literal("SmartParkour: варп не подтверждён, перезапусти клавишей O"), true);
+                    reset(mc);
+                    warpCooldownTicks = 200;
+                }
             }
-            case RETURN_MOVE -> {
-                release(mc);
-                if (homeReached(mc)) { homeComplete(mc); return; }
-                if (findTarget(mc) != null && isTarget(mc, mc.player.blockPosition().below())) {
-                    missingTargetTicks = 0; returningHome = false; transition(State.IDLE); return;
+            case WALK_TO_PLATE -> {
+                if (!mc.player.onGround()) { release(mc); return; }
+                if (homeReached(mc)) {
+                    release(mc);
+                    transition(State.WAIT_FOR_START);
+                    mc.player.displayClientMessage(Component.literal("SmartParkour: плита достигнута, жду запуска"), true);
+                    return;
                 }
-                if (!mc.player.onGround()) { transition(State.RETURN_ROTATE); return; }
-                if (!isFacingPoint(mc, home.getX() + .5, home.getZ() + .5)) {
-                    transition(State.RETURN_ROTATE); return;
+                if (phaseTicks > walkToPlateTimeoutTicks) {
+                    release(mc);
+                    mc.player.displayClientMessage(Component.literal("SmartParkour: не удалось дойти до плиты"), true);
+                    reset(mc);
+                    warpCooldownTicks = 200;
+                    return;
                 }
                 Vec3 pos = mc.player.position();
                 double dx = home.getX() + .5 - pos.x;
                 double dz = home.getZ() + .5 - pos.z;
                 double dist = Math.hypot(dx, dz);
-                if (dist < .001) { homeComplete(mc); return; }
-                double ux = dx / dist, uz = dz / dist;
-                // Refuse to blindly walk into a void. Navigation around obstacles
-                // requires a separate pathfinder and is deliberately not faked here.
-                BlockPos ahead = BlockPos.containing(pos.x + ux * .65, pos.y - .2, pos.z + uz * .65).below();
-                if (mc.level.getBlockState(ahead).isAir()) {
+                if (lastPlatePosition != null && pos.distanceToSqr(lastPlatePosition) < 0.0004) plateStuckTicks++;
+                else plateStuckTicks = 0;
+                lastPlatePosition = pos;
+                if (plateStuckTicks > approachStallLimitTicks * 4) {
                     release(mc);
-                    if (phaseTicks % 40 == 0) mc.player.displayClientMessage(Component.literal("SmartParkour: путь к старту прерван — впереди пустота"), true);
+                    mc.player.displayClientMessage(Component.literal("SmartParkour: путь к плите заблокирован"), true);
+                    reset(mc);
+                    warpCooldownTicks = 200;
                     return;
                 }
-                steer(mc, dx, dz, false, false);
+                // Don't walk into an unsupported gap. This is a short local approach,
+                // not a general pathfinder; never blindly walk over an edge.
+                if (!safeStepToPlate(mc, dx, dz)) {
+                    release(mc);
+                    mc.player.displayClientMessage(Component.literal("SmartParkour: перед плитой нет безопасного прохода"), true);
+                    reset(mc);
+                    warpCooldownTicks = 200;
+                    return;
+                }
+                look(mc, home.getX() + .5, home.getZ() + .5);
+                steer(mc, dx / Math.max(dist, .001), dz / Math.max(dist, .001), false, false);
+                mc.options.keyShift.setDown(false);
+            }
+            case WAIT_FOR_START -> {
+                release(mc);
+                // Wait for the plate to activate the course. A gray-wool target
+                // is the actual start signal, not merely completing the warp.
+                if (findTarget(mc) != null) {
+                    returningHome = false;
+                    warpCommandSent = false;
+                    warpOrigin = null;
+                    missingTargetTicks = 0;
+                    warpCooldownTicks = 200;
+                    transition(State.IDLE);
+                    mc.player.displayClientMessage(Component.literal("SmartParkour: паркур запущен"), true);
+                } else if (phaseTicks >= startWaitTicks) {
+                    // Stay on the plate and keep checking; never warp-spam.
+                    phaseTicks = 0;
+                }
             }
             case LAND -> {
                 release(mc);
@@ -399,15 +456,26 @@ public final class SmartParkour implements ClientModInitializer {
         double tz = exactCenter ? 0.025 : centerToleranceZPixels / 16.0;
         return Math.abs(x - block.getX() - 0.5) <= tx && Math.abs(z - block.getZ() - 0.5) <= tz;
     }
+    private boolean safeStepToPlate(Minecraft mc, double dx, double dz) {
+        Vec3 pos = mc.player.position();
+        double d = Math.hypot(dx, dz);
+        if (d < .001) return true;
+        double probeX = pos.x + dx / d * .42;
+        double probeZ = pos.z + dz / d * .42;
+        BlockPos below = BlockPos.containing(probeX, pos.y - .2, probeZ);
+        return mc.level.getBlockState(below).isCollisionShapeFullBlock(mc.level, below);
+    }
     private boolean homeReached(Minecraft mc) {
         Vec3 pos = mc.player.position();
-        return mc.player.onGround() && Math.abs(pos.x - (home.getX() + .5)) < .20
-            && Math.abs(pos.z - (home.getZ() + .5)) < .20
+        return mc.player.onGround() && Math.abs(pos.x - (home.getX() + .5)) < .30
+            && Math.abs(pos.z - (home.getZ() + .5)) < .30
             && Math.abs(pos.y - home.getY()) < .12;
     }
     private void homeComplete(Minecraft mc) {
         release(mc);
         returningHome = false;
+        warpCommandSent = false;
+        warpOrigin = null;
         missingTargetTicks = 0;
         transition(State.IDLE);
     }
@@ -538,7 +606,7 @@ public final class SmartParkour implements ClientModInitializer {
         Vec3 now = mc.player.position();
         BlockPos platform = mc.player.onGround() ? mc.player.blockPosition().below() : null;
         // Deliberate waiting between jumps is not a stuck condition.
-        if (state == State.LAND || state == State.IDLE && target == null && !returningHome) {
+        if (state == State.RETURN_WARP || state == State.WALK_TO_PLATE || state == State.WAIT_FOR_START || state == State.LAND || state == State.IDLE && target == null && !returningHome) {
             clearInactivityWatch();
         } else if (lastWatchPosition == null || lastWatchState != state ||
                    !java.util.Objects.equals(lastWatchPlatform, platform) ||
@@ -553,7 +621,7 @@ public final class SmartParkour implements ClientModInitializer {
         lastWatchPlatform = platform;
         return false;
     }
-    private void reset(Minecraft mc) { clearInactivityWatch(); release(mc); returningHome = false; missingTargetTicks = 0; state = State.IDLE; target = null; departure = null; landingPlatform = null; centeredTicks = 0; facingTicks = 0; airborneSeen = false; phaseTicks = 0; clearRoute(); }
+    private void reset(Minecraft mc) { warpCommandSent = false; warpOrigin = null; warpCooldownTicks = 0; lastPlatePosition = null; plateStuckTicks = 0; warpDetected = false; clearInactivityWatch(); release(mc); returningHome = false; missingTargetTicks = 0; state = State.IDLE; target = null; departure = null; landingPlatform = null; centeredTicks = 0; facingTicks = 0; airborneSeen = false; phaseTicks = 0; clearRoute(); }
     private void transition(State next) { if (next != State.APPROACH || state != State.APPROACH) { approachStallTicks = 0; lastApproachPosition = null; } state = next; phaseTicks = 0; if (next == State.ROTATE) facingTicks = 0; if (next == State.FLIGHT) { airborneSeen = false; landingSneak = false; } }
     private static int readTicks(Properties p, String key, int def, int min, int max) {
         try { return Math.max(min, Math.min(max, Integer.parseInt(p.getProperty(key, Integer.toString(def))))); }
@@ -576,6 +644,9 @@ public final class SmartParkour implements ClientModInitializer {
             approachStallLimitTicks = readTicks(props, "approachStallTicks", 5, 1, 100);
             facingConfirmTicks = readTicks(props, "facingConfirmTicks", 2, 1, 20);
             homeFacingConfirmTicks = readTicks(props, "homeFacingConfirmTicks", 2, 1, 20);
+            warpWaitTicks = readTicks(props, "warpWaitTicks", 160, 20, 600);
+            walkToPlateTimeoutTicks = readTicks(props, "walkToPlateTimeoutTicks", 240, 20, 1200);
+            startWaitTicks = readTicks(props, "startWaitTicks", 100, 20, 600);
             centerToleranceXPixels = readTicks(props, "centerToleranceXPixels", 3, 0, 8);
             centerToleranceZPixels = readTicks(props, "centerToleranceZPixels", 3, 0, 8);
             exactCenter = Boolean.parseBoolean(props.getProperty("exactCenter", "false"));
@@ -600,6 +671,9 @@ public final class SmartParkour implements ClientModInitializer {
             props.setProperty("approachStallTicks", Integer.toString(approachStallLimitTicks));
             props.setProperty("facingConfirmTicks", Integer.toString(facingConfirmTicks));
             props.setProperty("homeFacingConfirmTicks", Integer.toString(homeFacingConfirmTicks));
+            props.setProperty("warpWaitTicks", Integer.toString(warpWaitTicks));
+            props.setProperty("walkToPlateTimeoutTicks", Integer.toString(walkToPlateTimeoutTicks));
+            props.setProperty("startWaitTicks", Integer.toString(startWaitTicks));
             props.setProperty("centerToleranceXPixels", Integer.toString(centerToleranceXPixels));
             props.setProperty("centerToleranceZPixels", Integer.toString(centerToleranceZPixels));
             props.setProperty("exactCenter", Boolean.toString(exactCenter));
@@ -617,9 +691,11 @@ public final class SmartParkour implements ClientModInitializer {
         private Component error = Component.empty();
         private boolean timersPage = false;
         private boolean centeringPage = false;
+        private boolean recoveryTimersPage = false;
         SettingsScreen() { super(Component.literal("SmartParkour — настройки")); }
         @Override protected void init() {
             if (timersPage) { initTimers(); return; }
+            if (recoveryTimersPage) { initRecoveryTimers(); return; }
             if (centeringPage) { initCentering(); return; }
             int center = this.width / 2;
             int y = this.height / 2 - 135;
@@ -703,9 +779,22 @@ public final class SmartParkour implements ClientModInitializer {
             addTimer(cx, y + 135, "Застревание подхода", 1, 100, () -> approachStallLimitTicks, v -> approachStallLimitTicks = v);
             addTimer(cx, y + 162, "Поворот", 1, 20, () -> facingConfirmTicks, v -> facingConfirmTicks = v);
             addTimer(cx, y + 189, "Поворот домой", 1, 20, () -> homeFacingConfirmTicks, v -> homeFacingConfirmTicks = v);
+            addRenderableWidget(Button.builder(Component.literal("Таймеры возвращения..."), b -> {
+                recoveryTimersPage = true; timersPage = false; clearWidgets(); init();
+            }).bounds(cx - 110, y + 219, 220, 20).build());
             addRenderableWidget(Button.builder(Component.literal("Назад / сохранить"), b -> {
                 saveConfig(); timersPage = false; clearWidgets(); init();
-            }).bounds(cx - 110, y + 219, 220, 20).build());
+            }).bounds(cx - 110, y + 244, 220, 20).build());
+        }
+        private void initRecoveryTimers() {
+            int cx = width / 2;
+            int y = height / 2 - 65;
+            addTimer(cx, y, "Ожидание варпа", 20, 600, () -> warpWaitTicks, v -> warpWaitTicks = v);
+            addTimer(cx, y + 30, "Подход к плите", 20, 1200, () -> walkToPlateTimeoutTicks, v -> walkToPlateTimeoutTicks = v);
+            addTimer(cx, y + 60, "Ожидание запуска", 20, 600, () -> startWaitTicks, v -> startWaitTicks = v);
+            addRenderableWidget(Button.builder(Component.literal("Назад / сохранить"), b -> {
+                saveConfig(); recoveryTimersPage = false; timersPage = true; clearWidgets(); init();
+            }).bounds(cx - 110, y + 100, 220, 20).build());
         }
         private void addTimer(int cx, int y, String title, int min, int max,
                               java.util.function.IntSupplier getter, java.util.function.IntConsumer setter) {

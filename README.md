@@ -1,11 +1,9 @@
-# SmartParkour 0.10.1 (source)
+# SmartParkour 0.10.3 — Warp + walk to plate
 
-Minecraft Java 1.21.11 / Fabric.
+Minecraft Java 1.21.11 / Fabric client mod source.
 
-Changes from 0.10.0:
-- On inactivity, scan for a reachable gray-wool target before switching to the home-return routine.
-- New **Centering accuracy...** page in P settings: exact-center switch, independent X and Z tolerance in block pixels (0–8). Y landing tolerance is at most 0.1 block and grounded state is required.
-- For center-to-center gaps of 2+ blocks, use sprint and approach toward a safe takeoff position instead of jumping from the center without sprint.
-- Existing timer settings preserved.
+Recovery sequence: scan for jump targets -> send `/warp parkour` once -> wait for server teleport -> walk to configurable plate coordinates (default -65 84 306) -> wait for gray wool platforms -> resume parkour.
 
-Source archive only. Build/gameplay tests have not been performed; validate on a test course. No teleportation.
+Settings (P) > All timers > Recovery timers: warp wait, walk-to-plate timeout, start wait. Timers saved in `config/smartparkour.properties`.
+
+Limitations: The walk is direct and checks for solid ground ahead; it cannot navigate around walls or jump gaps. If warp lands less than 3 blocks from the prior position, arrival may not be detected. Source not compiled or play-tested.
