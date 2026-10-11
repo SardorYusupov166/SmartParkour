@@ -34,6 +34,11 @@ public final class SmartParkour implements ClientModInitializer {
     private int homeFacingTicks;
     private boolean returningHome;
     private static final double EDGE_MARGIN = 0.13;
+    // If a target is close enough to collide with the approach, jump from center.
+    private static final double CLOSE_JUMP_DISTANCE = 2.05;
+    private static final int APPROACH_STALL_TICKS = 5;
+    private int approachStallTicks;
+    private Vec3 lastApproachPosition;
     private static final double CENTER_TOLERANCE = 0.075;
     private static final int SEARCH_RADIUS = 6;
     private static final double YAW_TOLERANCE_DEGREES = 2.0;
@@ -47,6 +52,11 @@ public final class SmartParkour implements ClientModInitializer {
     private BlockPos target;
     private BlockPos departure;
     private BlockPos previousPlatform;
+    // One-time detour: origin -> intermediate -> original -> intermediate.
+    private BlockPos routeOriginal;
+    private BlockPos routeIntermediate;
+    private int routeStep; // 0: no detour, 1: go original, 2: revisit intermediate
+
     private boolean airborneSeen;
     private int phaseTicks;
     private boolean jumpLatch;
@@ -78,9 +88,10 @@ public final class SmartParkour implements ClientModInitializer {
             enabled = !enabled;
             reset(mc);
             previousPlatform = null;
+            clearRoute();
             missingTargetTicks = 0;
             returningHome = false;
-            if (mc.player != null) mc.player.displayClientMessage(Component.literal("SmartParkour 0.9.1: " + (enabled ? "ON" : "OFF")), true);
+            if (mc.player != null) mc.player.displayClientMessage(Component.literal("SmartParkour 0.9.4: " + (enabled ? "ON" : "OFF")), true);
         }
         toggleWasDown = down;
         if (!enabled || mc.player == null || mc.level == null) return;
@@ -112,18 +123,27 @@ public final class SmartParkour implements ClientModInitializer {
                 if (!mc.player.onGround()) return;
                 BlockPos standing = mc.player.blockPosition().below();
                 if (!isTarget(mc, standing)) { release(mc); return; }
-                target = findTarget(mc);
+                if (routeStep == 1 && isTarget(mc, routeOriginal) && !standing.equals(routeOriginal)) {
+                    target = routeOriginal;
+                } else if (routeStep == 3 && isTarget(mc, routeIntermediate) && !standing.equals(routeIntermediate)) {
+                    target = routeIntermediate;
+                } else {
+                    if (routeStep != 0) clearRoute();
+                    target = findTarget(mc);
+                }
                 if (target != null) { departure = standing.immutable(); transition(State.ROTATE); }
             }
             case ROTATE -> {
                 release(mc);
                 if (target == null || departure == null || !isTarget(mc, target) || !mc.player.onGround()) { reset(mc); return; }
+                if (rerouteThroughIntermediate(mc)) return;
                 look(mc, target.getX() + .5, target.getZ() + .5);
                 transition(State.VERIFY);
             }
             case VERIFY -> {
                 release(mc);
                 if (target == null || departure == null || !isTarget(mc, target) || !mc.player.onGround()) { reset(mc); return; }
+                if (rerouteThroughIntermediate(mc)) return;
                 if (!isFacing(mc, target)) {
                     look(mc, target.getX() + .5, target.getZ() + .5);
                     facingTicks = 0;
@@ -133,6 +153,7 @@ public final class SmartParkour implements ClientModInitializer {
             }
             case ALIGN -> {
                 if (target == null || !isTarget(mc, target) || !mc.player.onGround()) { reset(mc); return; }
+                if (rerouteThroughIntermediate(mc)) return;
                 Vec3 pos = mc.player.position();
                 BlockPos under = departure;
                 double cx = under.getX() + .5, cz = under.getZ() + .5;
@@ -143,6 +164,7 @@ public final class SmartParkour implements ClientModInitializer {
             }
             case APPROACH -> {
                 if (target == null || !isTarget(mc, target) || !mc.player.onGround()) { reset(mc); return; }
+                if (rerouteThroughIntermediate(mc)) return;
                 Vec3 pos = mc.player.position();
                 BlockPos under = departure;
                 double dx = target.getX() + .5 - (under.getX() + .5);
@@ -150,13 +172,24 @@ public final class SmartParkour implements ClientModInitializer {
                 double dist = Math.hypot(dx, dz);
                 if (dist < .001) { reset(mc); return; }
                 double ux = dx / dist, uz = dz / dist;
-                double edgeX = under.getX() + .5 + ux * (.5 - EDGE_MARGIN) / Math.max(Math.abs(ux), Math.abs(uz));
-                double edgeZ = under.getZ() + .5 + uz * (.5 - EDGE_MARGIN) / Math.max(Math.abs(ux), Math.abs(uz));
+                if (!isFacing(mc, target)) { release(mc); transition(State.ROTATE); return; }
+                // Never insist on walking to the edge when the next block is close.
+                // A nearby or elevated block can physically obstruct that approach.
+                double travel = Math.max(0.0, Math.min(.5 - EDGE_MARGIN,
+                        (dist - CLOSE_JUMP_DISTANCE) * 0.28));
+                double edgeX = under.getX() + .5 + ux * travel / Math.max(Math.abs(ux), Math.abs(uz));
+                double edgeZ = under.getZ() + .5 + uz * travel / Math.max(Math.abs(ux), Math.abs(uz));
                 double remain = (edgeX - pos.x) * ux + (edgeZ - pos.z) * uz;
                 boolean sprint = dist > 2.65 || target.getY() > under.getY();
-                if (!isFacing(mc, target)) { release(mc); transition(State.ROTATE); return; }
-                // Jump while still supported by the departure block, retaining the short approach velocity.
-                boolean jump = remain <= Math.max(.10, mc.player.getDeltaMovement().horizontalDistance() * 1.35);
+                // If movement is blocked for several ticks, jump rather than stall.
+                if (lastApproachPosition != null &&
+                        Math.hypot(pos.x - lastApproachPosition.x, pos.z - lastApproachPosition.z) < 0.012)
+                    approachStallTicks++;
+                else approachStallTicks = 0;
+                lastApproachPosition = pos;
+                boolean closeJump = dist <= CLOSE_JUMP_DISTANCE;
+                boolean jump = closeJump || approachStallTicks >= APPROACH_STALL_TICKS ||
+                        remain <= Math.max(.10, mc.player.getDeltaMovement().horizontalDistance() * 1.35);
                 steer(mc, ux, uz, sprint, jump);
                 if (jump) { jumpLatch = true; transition(State.FLIGHT); }
             }
@@ -176,7 +209,7 @@ public final class SmartParkour implements ClientModInitializer {
                 double maxZ = target.getZ() + 0.97;
                 boolean feetInside = pos.x >= minX && pos.x <= maxX
                         && pos.z >= minZ && pos.z <= maxZ;
-                double surfaceY = target.getY() + 1.0;
+                double surfaceY = target.getY() + 1.0; // Target block top Y, not a rounded player Y
                 boolean descending = mc.player.getDeltaMovement().y <= 0.0;
                 boolean aboveSurface = pos.y >= surfaceY - 0.001;
                 landingSneak = feetInside && descending && aboveSurface;
@@ -197,18 +230,25 @@ public final class SmartParkour implements ClientModInitializer {
 
                 // The block's integer Y is its bottom. Player feet must be at
                 // blockY + 1.0, not at a fractional Y while still falling.
+                // Confirm landing against the TARGET block's exact top surface.
+                // Never use rounding of the player's Y (e.g. 56.8 -> 56).
                 boolean landedAtSurface = mc.player.onGround()
-                        && Math.abs(pos.y - surfaceY) <= 0.001
-                        && feetInside;
+                        && Math.abs(mc.player.getY() - (target.getY() + 1.0)) <= 0.001
+                        && feetInside
+                        && isTarget(mc, target);
                 if (landedAtSurface && airborneSeen) {
                     releaseMovement(mc);
                     previousPlatform = departure;
+                    if (routeStep == 1 && target.equals(routeIntermediate)) routeStep = 2;
+                    else if (routeStep == 2 && target.equals(routeOriginal)) routeStep = 3;
+                    else if (routeStep == 3 && target.equals(routeIntermediate)) clearRoute();
                     landingPlatform = target.immutable();
                     departure = null;
                     target = null;
                     centeredTicks = 0;
-                    landingSneak = true;
-                    mc.options.keyShift.setDown(true);
+                    // Landing is confirmed: release sneak IMMEDIATELY.
+                    landingSneak = false;
+                    mc.options.keyShift.setDown(false);
                     transition(State.CENTER);
                 } else if (mc.player.onGround() && airborneSeen && !landedAtSurface) {
                     // Grounded somewhere else: abort instead of selecting a
@@ -240,7 +280,7 @@ public final class SmartParkour implements ClientModInitializer {
                         mc.options.keyShift.setDown(false);
                         landingPlatform = null;
                         transition(State.LAND);
-                    } else mc.options.keyShift.setDown(true);
+                    } else mc.options.keyShift.setDown(false);
                 } else {
                     centeredTicks = 0;
                     // Predict a few ticks ahead to begin braking before reaching center.
@@ -248,8 +288,8 @@ public final class SmartParkour implements ClientModInitializer {
                     double desiredZ = ez * 0.35 - vel.z * 1.8;
                     if (Math.hypot(desiredX, desiredZ) < 0.012) releaseMovement(mc);
                     else steer(mc, desiredX, desiredZ, false, false);
-                    landingSneak = true;
-                    mc.options.keyShift.setDown(true);
+                    landingSneak = false;
+                    mc.options.keyShift.setDown(false);
                 }
             }
             case RETURN_ROTATE -> {
@@ -318,6 +358,41 @@ public final class SmartParkour implements ClientModInitializer {
         if (mc.player != null) mc.player.displayClientMessage(
             Component.literal("SmartParkour: задержка " + jumpDelayTicks + " тиков (" + (jumpDelayTicks * 50) + " мс)"), true);
     }
+    private void clearRoute() { routeStep = 0; routeOriginal = null; routeIntermediate = null; }
+
+    // Only reroute while still standing on the departure platform.
+    // A new wool platform on the line to the locked target takes precedence.
+    private boolean rerouteThroughIntermediate(Minecraft mc) {
+        if (routeStep != 0 || target == null || departure == null) return false;
+        double ax = departure.getX() + .5, az = departure.getZ() + .5;
+        double bx = target.getX() + .5, bz = target.getZ() + .5;
+        double vx = bx - ax, vz = bz - az;
+        double lengthSq = vx * vx + vz * vz;
+        if (lengthSq < 2.0) return false;
+        BlockPos middle = null;
+        double bestT = Double.POSITIVE_INFINITY;
+        for (int x = -SEARCH_RADIUS; x <= SEARCH_RADIUS; x++)
+            for (int z = -SEARCH_RADIUS; z <= SEARCH_RADIUS; z++)
+                for (int y = -1; y <= 1; y++) {
+                    BlockPos p = departure.offset(x, y, z);
+                    if (p.equals(departure) || p.equals(target) || !isTarget(mc, p)) continue;
+                    double wx = p.getX() + .5 - ax, wz = p.getZ() + .5 - az;
+                    double t = (wx * vx + wz * vz) / lengthSq;
+                    if (t <= .02 || t >= .98) continue;
+                    double off = Math.hypot(wx - t * vx, wz - t * vz);
+                    if (off > .65 || Math.hypot(wx, wz) < 0.95) continue;
+                    if (t < bestT) { bestT = t; middle = p.immutable(); }
+                }
+        if (middle == null) return false;
+        routeOriginal = target.immutable();
+        routeIntermediate = middle;
+        routeStep = 1;
+        target = middle;
+        release(mc);
+        transition(State.ROTATE);
+        return true;
+    }
+
     private BlockPos findTarget(Minecraft mc) {
         BlockPos current = mc.player.blockPosition().below();
         BlockPos best = null;
@@ -327,7 +402,7 @@ public final class SmartParkour implements ClientModInitializer {
                 BlockPos p = current.offset(x, y, z);
                 if (p.equals(current) || p.equals(previousPlatform) || !isTarget(mc, p)) continue;
                 double horizontal = Math.hypot(x, z);
-                if (horizontal < 1.3 || horizontal > 5.2) continue;
+                if (horizontal < 0.95 || horizontal > 5.2) continue;
                 double s = horizontal + Math.abs(y) * .3;
                 // Stable tie-break: coordinates, independent of iteration timing.
                 if (s < score - 1e-7 || (Math.abs(s - score) < 1e-7 &&
@@ -387,8 +462,8 @@ public final class SmartParkour implements ClientModInitializer {
         landingSneak = false;
         jumpLatch = false;
     }
-    private void reset(Minecraft mc) { release(mc); returningHome = false; missingTargetTicks = 0; state = State.IDLE; target = null; departure = null; landingPlatform = null; centeredTicks = 0; facingTicks = 0; airborneSeen = false; phaseTicks = 0; }
-    private void transition(State next) { state = next; phaseTicks = 0; if (next == State.ROTATE) facingTicks = 0; if (next == State.FLIGHT) { airborneSeen = false; landingSneak = false; } }
+    private void reset(Minecraft mc) { release(mc); returningHome = false; missingTargetTicks = 0; state = State.IDLE; target = null; departure = null; landingPlatform = null; centeredTicks = 0; facingTicks = 0; airborneSeen = false; phaseTicks = 0; clearRoute(); }
+    private void transition(State next) { if (next != State.APPROACH || state != State.APPROACH) { approachStallTicks = 0; lastApproachPosition = null; } state = next; phaseTicks = 0; if (next == State.ROTATE) facingTicks = 0; if (next == State.FLIGHT) { airborneSeen = false; landingSneak = false; } }
     private void loadConfig() {
         if (!Files.isRegularFile(configPath)) return;
         try {
