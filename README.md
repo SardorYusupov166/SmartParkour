@@ -1,20 +1,21 @@
-# SmartParkour 0.2 — GitHub Actions build
+# SmartParkour 0.5 (experimental)
 
-Экспериментальный клиентский Fabric-мод для Minecraft 1.21.11. **Не проверен компиляцией или в игре.**
+Fabric 1.21.11 client-only source. Requires Java 21 and Fabric API.
 
-## Сборка без установки Java/Gradle
+## New in 0.5
+- Scans loaded nearby blocks for `minecraft:gray_wool` each tick.
+- Tracks each continuous appearance of a gray-wool block with an internal ID.
+- A visited platform is excluded only for its current appearance; if it disappears and later reappears at the same coordinates it receives a new ID.
+- Stops after landing before choosing the next jump (inherited 0.4 logic).
+- Optional ground-only fallback to coordinates via `config/smartparkour.properties`; when reached, returns to parkour mode.
+- If another gray-wool block is visible but unreachable, waits rather than starting fallback.
 
-1. Создайте пустой публичный или приватный репозиторий на GitHub.
-2. Загрузите **содержимое** этой папки в корень репозитория, сохраняя `.github/workflows/build.yml`.
-3. Откройте вкладку **Actions**, выберите **Build SmartParkour**, нажмите **Run workflow**.
-4. Если сборка успешна, откройте завершённый запуск и скачайте **SmartParkour-JAR** в разделе **Artifacts**.
-5. Распакуйте artifact, скопируйте обычный модовый JAR (не `-sources.jar`) в `%appdata%\.minecraft\mods`.
-6. Используйте Fabric Loader и совместимый Fabric API для Minecraft 1.21.11.
+## Important limitations
+- When two identical platforms are already present, their intended order cannot be inferred reliably. The mod uses a distance heuristic and may skip a required platform.
+- This is an untested experimental controller; compile and test carefully. It may miss jumps or move off edges. Use on a test course first.
+- If a platform vanishes and respawns within a single client tick, polling may not distinguish the replacement.
+- Fallback movement is ground-only and has no obstacle pathfinding.
+- Key R toggles the mod and may conflict with shader reload bindings.
 
-**Если сборка красная:** откройте шаг `Build mod`, скопируйте текст ошибки. Этот проект может требовать исправлений зависимостей или исходников. GitHub Actions не гарантирует успешную сборку.
-
-## Что внутри
-
-Исходники из SmartParkour 0.2 без изменений, конфигурация Gradle, workflow GitHub Actions. Workflow устанавливает Gradle автоматически; **Gradle Wrapper в архив не включён**, поскольку wrapper JAR не был доступен для достоверной генерации. Для локальной сборки с установленным Gradle: `gradle build`.
-
-Клавиша R — включение/выключение экспериментального контроллера. Перед использованием на сервере проверьте мод в тестовом мире и правила сервера.
+## Build
+Upload the contents (including `.github/workflows/build.yml`) to GitHub and check Actions. The workflow builds and uploads `build/libs/*.jar`. The build has not been verified here.
