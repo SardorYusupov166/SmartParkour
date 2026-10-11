@@ -1,0 +1,6 @@
+{
+ "schemaVersion":1,"id":"smartparkour","version":"${version}","name":"SmartParkour",
+ "description":"Experimental client-side automatic parkour planner",
+ "environment":"client","entrypoints":{"client":["dev.smartparkour.SmartParkour"]},
+ "depends":{"fabricloader":">=0.18.0","minecraft":"1.21.11","java":">=21","fabric-api":"*"}
+}
