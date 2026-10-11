@@ -1,10 +1,1 @@
-# SmartParkour 0.9.9 — Movement Fix
-
-Minecraft Java 1.21.11 / Fabric.
-
-- Fixed sign of camera-relative strafing in `steer()` (A/D).
-- Normalized steering direction to avoid dead zones for short vectors.
-- Added a departure-edge emergency takeoff threshold.
-- Preserved existing target lock, adaptive jumps, landing, centering, return-home, configuration, O/P hotkeys and menu behavior.
-
-**Not yet Gradle-built or in-game tested.** Test diagonal jumps and near-edge takeoffs before unattended use.
+SmartParkour 0.10.0 — настраиваемые таймеры. Откройте P → Все таймеры. Все значения хранятся в config/smartparkour.properties. 1 тик = 50 мс при 20 TPS. Сборка и запуск не проверены.
