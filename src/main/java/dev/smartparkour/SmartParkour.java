@@ -7,6 +7,14 @@ import net.minecraft.client.KeyMapping;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.client.gui.components.Button;
+import net.minecraft.client.gui.components.EditBox;
+import net.fabricmc.loader.api.FabricLoader;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.charset.StandardCharsets;
+import java.util.Properties;
+import java.io.StringReader;
+import java.io.StringWriter;
 import net.minecraft.client.gui.components.AbstractSliderButton;
 import net.minecraft.core.BlockPos;
 import net.minecraft.network.chat.Component;
@@ -17,11 +25,19 @@ import com.mojang.blaze3d.platform.InputConstants;
 
 /** Fresh 0.8 controller. No teleportation, no persistent key overrides. */
 public final class SmartParkour implements ClientModInitializer {
-    private enum State { IDLE, ALIGN, APPROACH, FLIGHT, CENTER, LAND }
+    private enum State { IDLE, ROTATE, VERIFY, ALIGN, APPROACH, FLIGHT, CENTER, LAND, RETURN_ROTATE, RETURN_MOVE }
     private boolean landingSneak;
+    private BlockPos home = new BlockPos(-65, 84, 306);
+    private final Path configPath = FabricLoader.getInstance().getConfigDir().resolve("smartparkour.properties");
+    private static final int NO_TARGET_TICKS = 12;
+    private int missingTargetTicks;
+    private int homeFacingTicks;
+    private boolean returningHome;
     private static final double EDGE_MARGIN = 0.13;
     private static final double CENTER_TOLERANCE = 0.075;
     private static final int SEARCH_RADIUS = 6;
+    private static final double YAW_TOLERANCE_DEGREES = 2.0;
+    private int facingTicks;
     private KeyMapping toggle;
     private KeyMapping settingsKey;
     // 20 client ticks = approximately one second at normal TPS.
@@ -39,6 +55,7 @@ public final class SmartParkour implements ClientModInitializer {
     private int centeredTicks;
 
     @Override public void onInitializeClient() {
+        loadConfig();
         toggle = KeyBindingHelper.registerKeyBinding(new KeyMapping("key.smartparkour.toggle", InputConstants.Type.KEYSYM, GLFW.GLFW_KEY_O, KeyMapping.Category.MISC));
         settingsKey = KeyBindingHelper.registerKeyBinding(new KeyMapping("key.smartparkour.settings", InputConstants.Type.KEYSYM, GLFW.GLFW_KEY_P, KeyMapping.Category.MISC));
         ClientTickEvents.END_CLIENT_TICK.register(this::tick);
@@ -61,7 +78,9 @@ public final class SmartParkour implements ClientModInitializer {
             enabled = !enabled;
             reset(mc);
             previousPlatform = null;
-            if (mc.player != null) mc.player.displayClientMessage(Component.literal("SmartParkour 0.8.8: " + (enabled ? "ON" : "OFF")), true);
+            missingTargetTicks = 0;
+            returningHome = false;
+            if (mc.player != null) mc.player.displayClientMessage(Component.literal("SmartParkour 0.9.1: " + (enabled ? "ON" : "OFF")), true);
         }
         toggleWasDown = down;
         if (!enabled || mc.player == null || mc.level == null) return;
@@ -71,21 +90,53 @@ public final class SmartParkour implements ClientModInitializer {
             if (target != null) transition(State.FLIGHT);
             else { release(mc); return; }
         }
-        if (++phaseTicks > 120) { reset(mc); return; }
+        if (++phaseTicks > 120 && state != State.RETURN_ROTATE && state != State.RETURN_MOVE) { reset(mc); return; }
+        // Do not interrupt an airborne jump or the landing/centering sequence.
+        if (state == State.IDLE && mc.player.onGround()) {
+            BlockPos standing = mc.player.blockPosition().below();
+            if (findTarget(mc) == null) {
+                if (++missingTargetTicks >= NO_TARGET_TICKS) {
+                    if (!returningHome) mc.player.displayClientMessage(Component.literal("SmartParkour: возврат к " + home.getX() + " " + home.getY() + " " + home.getZ()), true);
+                    returningHome = true;
+                    target = null;
+                    departure = null;
+                    transition(State.RETURN_ROTATE);
+                }
+            } else {
+                missingTargetTicks = 0;
+                returningHome = false;
+            }
+        }
         switch (state) {
             case IDLE -> {
                 if (!mc.player.onGround()) return;
                 BlockPos standing = mc.player.blockPosition().below();
                 if (!isTarget(mc, standing)) { release(mc); return; }
                 target = findTarget(mc);
-                if (target != null) { departure = standing.immutable(); transition(State.ALIGN); }
+                if (target != null) { departure = standing.immutable(); transition(State.ROTATE); }
+            }
+            case ROTATE -> {
+                release(mc);
+                if (target == null || departure == null || !isTarget(mc, target) || !mc.player.onGround()) { reset(mc); return; }
+                look(mc, target.getX() + .5, target.getZ() + .5);
+                transition(State.VERIFY);
+            }
+            case VERIFY -> {
+                release(mc);
+                if (target == null || departure == null || !isTarget(mc, target) || !mc.player.onGround()) { reset(mc); return; }
+                if (!isFacing(mc, target)) {
+                    look(mc, target.getX() + .5, target.getZ() + .5);
+                    facingTicks = 0;
+                    return;
+                }
+                if (++facingTicks >= 2) transition(State.ALIGN);
             }
             case ALIGN -> {
                 if (target == null || !isTarget(mc, target) || !mc.player.onGround()) { reset(mc); return; }
                 Vec3 pos = mc.player.position();
                 BlockPos under = departure;
                 double cx = under.getX() + .5, cz = under.getZ() + .5;
-                look(mc, target.getX() + .5, target.getZ() + .5);
+                if (!isFacing(mc, target)) { release(mc); transition(State.ROTATE); return; }
                 if (Math.hypot(cx - pos.x, cz - pos.z) > CENTER_TOLERANCE) {
                     steer(mc, cx - pos.x, cz - pos.z, false, false);
                 } else { release(mc); transition(State.APPROACH); }
@@ -103,7 +154,7 @@ public final class SmartParkour implements ClientModInitializer {
                 double edgeZ = under.getZ() + .5 + uz * (.5 - EDGE_MARGIN) / Math.max(Math.abs(ux), Math.abs(uz));
                 double remain = (edgeX - pos.x) * ux + (edgeZ - pos.z) * uz;
                 boolean sprint = dist > 2.65 || target.getY() > under.getY();
-                look(mc, target.getX() + .5, target.getZ() + .5);
+                if (!isFacing(mc, target)) { release(mc); transition(State.ROTATE); return; }
                 // Jump while still supported by the departure block, retaining the short approach velocity.
                 boolean jump = remain <= Math.max(.10, mc.player.getDeltaMovement().horizontalDistance() * 1.35);
                 steer(mc, ux, uz, sprint, jump);
@@ -201,11 +252,67 @@ public final class SmartParkour implements ClientModInitializer {
                     mc.options.keyShift.setDown(true);
                 }
             }
+            case RETURN_ROTATE -> {
+                release(mc);
+                if (homeReached(mc)) { homeComplete(mc); return; }
+                if (findTarget(mc) != null && isTarget(mc, mc.player.blockPosition().below())) {
+                    missingTargetTicks = 0; returningHome = false; transition(State.IDLE); return;
+                }
+                if (!mc.player.onGround()) return;
+                look(mc, home.getX() + .5, home.getZ() + .5);
+                if (isFacingPoint(mc, home.getX() + .5, home.getZ() + .5)) {
+                    if (++homeFacingTicks >= 2) transition(State.RETURN_MOVE);
+                } else homeFacingTicks = 0;
+            }
+            case RETURN_MOVE -> {
+                release(mc);
+                if (homeReached(mc)) { homeComplete(mc); return; }
+                if (findTarget(mc) != null && isTarget(mc, mc.player.blockPosition().below())) {
+                    missingTargetTicks = 0; returningHome = false; transition(State.IDLE); return;
+                }
+                if (!mc.player.onGround()) { transition(State.RETURN_ROTATE); return; }
+                if (!isFacingPoint(mc, home.getX() + .5, home.getZ() + .5)) {
+                    transition(State.RETURN_ROTATE); return;
+                }
+                Vec3 pos = mc.player.position();
+                double dx = home.getX() + .5 - pos.x;
+                double dz = home.getZ() + .5 - pos.z;
+                double dist = Math.hypot(dx, dz);
+                if (dist < .001) { homeComplete(mc); return; }
+                double ux = dx / dist, uz = dz / dist;
+                // Refuse to blindly walk into a void. Navigation around obstacles
+                // requires a separate pathfinder and is deliberately not faked here.
+                BlockPos ahead = BlockPos.containing(pos.x + ux * .65, pos.y - .2, pos.z + uz * .65).below();
+                if (mc.level.getBlockState(ahead).isAir()) {
+                    release(mc);
+                    if (phaseTicks % 40 == 0) mc.player.displayClientMessage(Component.literal("SmartParkour: путь к старту прерван — впереди пустота"), true);
+                    return;
+                }
+                steer(mc, dx, dz, false, false);
+            }
             case LAND -> {
                 release(mc);
                 if (phaseTicks >= jumpDelayTicks) transition(State.IDLE);
             }
         }
+    }
+    private boolean homeReached(Minecraft mc) {
+        Vec3 pos = mc.player.position();
+        return mc.player.onGround() && Math.abs(pos.x - (home.getX() + .5)) < .20
+            && Math.abs(pos.z - (home.getZ() + .5)) < .20
+            && Math.abs(pos.y - home.getY()) < .12;
+    }
+    private void homeComplete(Minecraft mc) {
+        release(mc);
+        returningHome = false;
+        missingTargetTicks = 0;
+        transition(State.IDLE);
+    }
+    private boolean isFacingPoint(Minecraft mc, double x, double z) {
+        Vec3 pos = mc.player.position();
+        double desired = Math.toDegrees(Math.atan2(-(x - pos.x), z - pos.z));
+        double error = ((mc.player.getYRot() - desired + 540.0) % 360.0) - 180.0;
+        return Math.abs(error) <= YAW_TOLERANCE_DEGREES;
     }
     private void showDelay(Minecraft mc) {
         if (mc.player != null) mc.player.displayClientMessage(
@@ -238,6 +345,12 @@ public final class SmartParkour implements ClientModInitializer {
     private void look(Minecraft mc, double x, double z) {
         Vec3 pos = mc.player.position();
         mc.player.setYRot((float)(Math.toDegrees(Math.atan2(-(x - pos.x), z - pos.z))));
+    }
+    private boolean isFacing(Minecraft mc, BlockPos block) {
+        Vec3 pos = mc.player.position();
+        double desired = Math.toDegrees(Math.atan2(-(block.getX() + .5 - pos.x), block.getZ() + .5 - pos.z));
+        double error = ((mc.player.getYRot() - desired + 540.0) % 360.0) - 180.0;
+        return Math.abs(error) <= YAW_TOLERANCE_DEGREES;
     }
     private void steer(Minecraft mc, double dx, double dz, boolean sprint, boolean jump) {
         // No KeyMapping.setDown: prevents the 0.7 stuck-key bug when disabling.
@@ -274,14 +387,44 @@ public final class SmartParkour implements ClientModInitializer {
         landingSneak = false;
         jumpLatch = false;
     }
-    private void reset(Minecraft mc) { release(mc); state = State.IDLE; target = null; departure = null; landingPlatform = null; centeredTicks = 0; airborneSeen = false; phaseTicks = 0; }
-    private void transition(State next) { state = next; phaseTicks = 0; if (next == State.FLIGHT) { airborneSeen = false; landingSneak = false; } }
+    private void reset(Minecraft mc) { release(mc); returningHome = false; missingTargetTicks = 0; state = State.IDLE; target = null; departure = null; landingPlatform = null; centeredTicks = 0; facingTicks = 0; airborneSeen = false; phaseTicks = 0; }
+    private void transition(State next) { state = next; phaseTicks = 0; if (next == State.ROTATE) facingTicks = 0; if (next == State.FLIGHT) { airborneSeen = false; landingSneak = false; } }
+    private void loadConfig() {
+        if (!Files.isRegularFile(configPath)) return;
+        try {
+            Properties props = new Properties();
+            props.load(new StringReader(Files.readString(configPath, StandardCharsets.UTF_8)));
+            int x = Integer.parseInt(props.getProperty("homeX", "-65"));
+            int y = Integer.parseInt(props.getProperty("homeY", "84"));
+            int z = Integer.parseInt(props.getProperty("homeZ", "306"));
+            home = new BlockPos(x, y, z);
+            jumpDelayTicks = Math.max(0, Math.min(100, Integer.parseInt(props.getProperty("delayTicks", "10"))));
+        } catch (Exception ex) {
+            System.err.println("SmartParkour: cannot read config: " + ex.getMessage());
+        }
+    }
+    private void saveConfig() {
+        try {
+            Files.createDirectories(configPath.getParent());
+            Properties props = new Properties();
+            props.setProperty("homeX", Integer.toString(home.getX()));
+            props.setProperty("homeY", Integer.toString(home.getY()));
+            props.setProperty("homeZ", Integer.toString(home.getZ()));
+            props.setProperty("delayTicks", Integer.toString(jumpDelayTicks));
+            StringWriter writer = new StringWriter();
+            props.store(writer, "SmartParkour settings");
+            Files.writeString(configPath, writer.toString(), StandardCharsets.UTF_8);
+        } catch (Exception ex) {
+            System.err.println("SmartParkour: cannot save config: " + ex.getMessage());
+        }
+    }
     private final class SettingsScreen extends Screen {
+        private EditBox xField, yField, zField;
+        private Component error = Component.empty();
         SettingsScreen() { super(Component.literal("SmartParkour — настройки")); }
-
         @Override protected void init() {
             int center = this.width / 2;
-            int y = this.height / 2 - 25;
+            int y = this.height / 2 - 72;
             addRenderableWidget(new AbstractSliderButton(center - 110, y, 220, 20,
                     Component.empty(), jumpDelayTicks / 100.0) {
                 { updateMessage(); }
@@ -293,12 +436,37 @@ public final class SmartParkour implements ClientModInitializer {
                     updateMessage();
                 }
             });
-            addRenderableWidget(Button.builder(Component.literal("Готово"),
-                    button -> onClose()).bounds(center - 100, y + 32, 200, 20).build());
+            y += 38;
+            xField = new EditBox(this.font, center - 110, y, 68, 20, Component.literal("X"));
+            yField = new EditBox(this.font, center - 34, y, 68, 20, Component.literal("Y"));
+            zField = new EditBox(this.font, center + 42, y, 68, 20, Component.literal("Z"));
+            xField.setValue(Integer.toString(home.getX()));
+            yField.setValue(Integer.toString(home.getY()));
+            zField.setValue(Integer.toString(home.getZ()));
+            addRenderableWidget(xField);
+            addRenderableWidget(yField);
+            addRenderableWidget(zField);
+            addRenderableWidget(Button.builder(Component.literal("Сохранить"), button -> saveAndClose())
+                    .bounds(center - 110, y + 38, 220, 20).build());
         }
-
+        private void saveAndClose() {
+            try {
+                int x = Integer.parseInt(xField.getValue().trim());
+                int y = Integer.parseInt(yField.getValue().trim());
+                int z = Integer.parseInt(zField.getValue().trim());
+                if (y < -64 || y > 320) {
+                    error = Component.literal("Y должен быть от -64 до 320");
+                    return;
+                }
+                home = new BlockPos(x, y, z);
+                saveConfig();
+                reset(Minecraft.getInstance());
+                onClose();
+            } catch (NumberFormatException ex) {
+                error = Component.literal("Введите целые координаты X, Y, Z");
+            }
+        }
         @Override public void onClose() { Minecraft.getInstance().setScreen(null); }
         @Override public boolean isPauseScreen() { return false; }
     }
-
 }
