@@ -12,3 +12,10 @@ Known limitations:
 - The nearest gray wool target heuristic can select the wrong block if unrelated gray wool is nearby.
 - No physically simulated trajectory yet; 3-gap jumps and diagonal jumps need in-game tuning.
 - Input override is temporary and restored on stop; screen transitions should be tested.
+
+
+## 0.8.1 compilation hotfix
+- Use KeyMapping.Category.MISC instead of a String category.
+- Remove unsupported Window.getWindow() and KeyMapping.getKey() calls.
+- Release simulated key states on reset.
+- GitHub Actions build still needs to verify this source against the mapped Minecraft API.

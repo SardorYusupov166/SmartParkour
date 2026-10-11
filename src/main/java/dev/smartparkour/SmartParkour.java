@@ -26,7 +26,7 @@ public final class SmartParkour implements ClientModInitializer {
     private boolean jumpLatch;
 
     @Override public void onInitializeClient() {
-        toggle = KeyBindingHelper.registerKeyBinding(new KeyMapping("key.smartparkour.toggle", InputConstants.Type.KEYSYM, GLFW.GLFW_KEY_P, "category.smartparkour"));
+        toggle = KeyBindingHelper.registerKeyBinding(new KeyMapping("key.smartparkour.toggle", InputConstants.Type.KEYSYM, GLFW.GLFW_KEY_P, KeyMapping.Category.MISC));
         ClientTickEvents.END_CLIENT_TICK.register(this::tick);
     }
     private void tick(Minecraft mc) {
@@ -127,16 +127,15 @@ public final class SmartParkour implements ClientModInitializer {
     }
     private void release(Minecraft mc) {
         if (mc.options == null) return;
-        // Restore physical keyboard state, rather than forcing all controls off.
-        long window = mc.getWindow().getWindow();
-        restore(mc.options.keyUp, window); restore(mc.options.keyDown, window);
-        restore(mc.options.keyLeft, window); restore(mc.options.keyRight, window);
-        restore(mc.options.keySprint, window); restore(mc.options.keyJump, window);
+        // Release only the keys controlled by the mod. Vanilla input polling
+        // resumes on the next client tick; never keep simulated keys held.
+        mc.options.keyUp.setDown(false);
+        mc.options.keyDown.setDown(false);
+        mc.options.keyLeft.setDown(false);
+        mc.options.keyRight.setDown(false);
+        mc.options.keySprint.setDown(false);
+        mc.options.keyJump.setDown(false);
         jumpLatch = false;
-    }
-    private void restore(KeyMapping key, long window) {
-        InputConstants.Key mapped = key.getKey();
-        key.setDown(mapped.getType() == InputConstants.Type.KEYSYM && GLFW.glfwGetKey(window, mapped.getValue()) == GLFW.GLFW_PRESS);
     }
     private void reset(Minecraft mc) { release(mc); state = State.IDLE; target = null; phaseTicks = 0; }
     private void transition(State next) { state = next; phaseTicks = 0; }
