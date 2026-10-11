@@ -5,6 +5,9 @@ import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
 import net.minecraft.client.KeyMapping;
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.gui.screens.Screen;
+import net.minecraft.client.gui.components.Button;
+import net.minecraft.client.gui.components.AbstractSliderButton;
 import net.minecraft.core.BlockPos;
 import net.minecraft.network.chat.Component;
 import net.minecraft.world.level.block.Blocks;
@@ -19,6 +22,9 @@ public final class SmartParkour implements ClientModInitializer {
     private static final double CENTER_TOLERANCE = 0.075;
     private static final int SEARCH_RADIUS = 6;
     private KeyMapping toggle;
+    private KeyMapping settingsKey;
+    // 20 client ticks = approximately one second at normal TPS.
+    private int jumpDelayTicks = 10;
     private boolean enabled;
     private State state = State.IDLE;
     private BlockPos target;
@@ -26,16 +32,26 @@ public final class SmartParkour implements ClientModInitializer {
     private boolean jumpLatch;
 
     @Override public void onInitializeClient() {
-        toggle = KeyBindingHelper.registerKeyBinding(new KeyMapping("key.smartparkour.toggle", InputConstants.Type.KEYSYM, GLFW.GLFW_KEY_P, KeyMapping.Category.MISC));
+        toggle = KeyBindingHelper.registerKeyBinding(new KeyMapping("key.smartparkour.toggle", InputConstants.Type.KEYSYM, GLFW.GLFW_KEY_O, KeyMapping.Category.MISC));
+        settingsKey = KeyBindingHelper.registerKeyBinding(new KeyMapping("key.smartparkour.settings", InputConstants.Type.KEYSYM, GLFW.GLFW_KEY_P, KeyMapping.Category.MISC));
         ClientTickEvents.END_CLIENT_TICK.register(this::tick);
     }
     private void tick(Minecraft mc) {
+        while (settingsKey.consumeClick()) {
+            if (mc.screen instanceof SettingsScreen) mc.setScreen(null);
+            else {
+                // Pause automation and relinquish keys before opening a GUI.
+                reset(mc);
+                mc.setScreen(new SettingsScreen());
+            }
+        }
         while (toggle.consumeClick()) {
             enabled = !enabled;
             reset(mc);
-            if (mc.player != null) mc.player.displayClientMessage(Component.literal("SmartParkour 0.8: " + (enabled ? "ON" : "OFF")), true);
+            if (mc.player != null) mc.player.displayClientMessage(Component.literal("SmartParkour 0.8.3: " + (enabled ? "ON" : "OFF")), true);
         }
-        if (!enabled || mc.player == null || mc.level == null || mc.screen != null) return;
+        if (!enabled || mc.player == null || mc.level == null) return;
+        if (mc.screen != null) { release(mc); return; }
         if (!mc.player.onGround()) {
             if (state != State.FLIGHT) { state = State.FLIGHT; phaseTicks = 0; }
         }
@@ -87,9 +103,13 @@ public final class SmartParkour implements ClientModInitializer {
             }
             case LAND -> {
                 release(mc);
-                if (phaseTicks >= 3) transition(State.IDLE);
+                if (phaseTicks >= jumpDelayTicks) transition(State.IDLE);
             }
         }
+    }
+    private void showDelay(Minecraft mc) {
+        if (mc.player != null) mc.player.displayClientMessage(
+            Component.literal("SmartParkour: задержка " + jumpDelayTicks + " тиков (" + (jumpDelayTicks * 50) + " мс)"), true);
     }
     private BlockPos findTarget(Minecraft mc) {
         BlockPos current = mc.player.blockPosition().below();
@@ -139,4 +159,29 @@ public final class SmartParkour implements ClientModInitializer {
     }
     private void reset(Minecraft mc) { release(mc); state = State.IDLE; target = null; phaseTicks = 0; }
     private void transition(State next) { state = next; phaseTicks = 0; }
+    private final class SettingsScreen extends Screen {
+        SettingsScreen() { super(Component.literal("SmartParkour — настройки")); }
+
+        @Override protected void init() {
+            int center = this.width / 2;
+            int y = this.height / 2 - 25;
+            addRenderableWidget(new AbstractSliderButton(center - 110, y, 220, 20,
+                    Component.empty(), jumpDelayTicks / 100.0) {
+                { updateMessage(); }
+                @Override protected void updateMessage() {
+                    setMessage(Component.literal("Задержка: " + jumpDelayTicks * 50 + " мс"));
+                }
+                @Override protected void applyValue() {
+                    jumpDelayTicks = Math.max(0, Math.min(100, (int) Math.round(this.value * 100)));
+                    updateMessage();
+                }
+            });
+            addRenderableWidget(Button.builder(Component.literal("Готово"),
+                    button -> onClose()).bounds(center - 100, y + 32, 200, 20).build());
+        }
+
+        @Override public void onClose() { Minecraft.getInstance().setScreen(null); }
+        @Override public boolean isPauseScreen() { return false; }
+    }
+
 }
