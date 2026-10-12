@@ -23,12 +23,15 @@ import net.minecraft.world.phys.Vec3;
 import org.lwjgl.glfw.GLFW;
 import com.mojang.blaze3d.platform.InputConstants;
 
-/** Fresh 0.8 controller. No teleportation, no persistent key overrides. */
+/** SmartParkour controller with cautious, balanced and experimental teleport modes. */
 public final class SmartParkour implements ClientModInitializer {
     private enum MovementMode { CAUTIOUS, BALANCED, CHEAT }
     private MovementMode movementMode = MovementMode.CAUTIOUS;
     private BlockPos queuedNextTarget;
-    private enum State { IDLE, ROTATE, VERIFY, ALIGN, APPROACH, FLIGHT, CENTER, LAND, RETURN_WARP, WALK_TO_PLATE, WAIT_FOR_START }
+    private BlockPos cheatExpectedLanding;
+    private Vec3 cheatRequestedPosition;
+    private static final int CHEAT_SETTLE_TIMEOUT_TICKS = 35;
+    private enum State { IDLE, ROTATE, VERIFY, ALIGN, APPROACH, FLIGHT, CENTER, LAND, CHEAT_SETTLE, RETURN_WARP, WALK_TO_PLATE, WAIT_FOR_START }
     private boolean landingSneak;
     private BlockPos home = new BlockPos(-65, 84, 306);
     private final Path configPath = FabricLoader.getInstance().getConfigDir().resolve("smartparkour.properties");
@@ -118,13 +121,13 @@ public final class SmartParkour implements ClientModInitializer {
             clearRoute();
             missingTargetTicks = 0;
             returningHome = false;
-            if (mc.player != null) mc.player.displayClientMessage(Component.literal("SmartParkour 0.10.7: " + (enabled ? "ON" : "OFF")), true);
+            if (mc.player != null) mc.player.displayClientMessage(Component.literal("SmartParkour 0.10.9: " + (enabled ? "ON" : "OFF")), true);
         }
         toggleWasDown = down;
         if (!enabled || mc.player == null || mc.level == null) return;
         if (warpCooldownTicks > 0) warpCooldownTicks--;
         if (mc.screen != null && !continueInMenus) { release(mc); clearInactivityWatch(); return; }
-        if (inactivityRescue && state != State.RETURN_WARP && state != State.WALK_TO_PLATE && state != State.WAIT_FOR_START && warpCooldownTicks == 0 && checkInactivity(mc)) {
+        if (movementMode != MovementMode.CHEAT && inactivityRescue && state != State.RETURN_WARP && state != State.WALK_TO_PLATE && state != State.WAIT_FOR_START && warpCooldownTicks == 0 && checkInactivity(mc)) {
             // Re-plan from the current platform before deciding to go home.
             BlockPos here = mc.player.blockPosition().below();
             BlockPos alternative = mc.player.onGround() && isTarget(mc, here) ? findTarget(mc) : null;
@@ -142,16 +145,16 @@ public final class SmartParkour implements ClientModInitializer {
             return;
         }
         // A jump target is immutable until landing, failure or explicit cancellation.
-        if (!mc.player.onGround() && state != State.FLIGHT && state != State.LAND && state != State.CENTER) {
+        if (!mc.player.onGround() && state != State.FLIGHT && state != State.LAND && state != State.CENTER && state != State.CHEAT_SETTLE) {
             if (target != null) transition(State.FLIGHT);
             else { release(mc); return; }
         }
-        if (++phaseTicks > phaseTimeoutTicks && state != State.RETURN_WARP && state != State.WALK_TO_PLATE && state != State.WAIT_FOR_START) { reset(mc); return; }
+        if (++phaseTicks > phaseTimeoutTicks && movementMode != MovementMode.CHEAT && state != State.RETURN_WARP && state != State.WALK_TO_PLATE && state != State.WAIT_FOR_START) { reset(mc); return; }
         // Do not interrupt an airborne jump or the landing/centering sequence.
         if (state == State.IDLE && mc.player.onGround()) {
             BlockPos standing = mc.player.blockPosition().below();
             if (findTarget(mc) == null) {
-                if (warpCooldownTicks == 0 && ++missingTargetTicks >= noTargetTicks) {
+                if (movementMode != MovementMode.CHEAT && warpCooldownTicks == 0 && ++missingTargetTicks >= noTargetTicks) {
                     if (!returningHome) mc.player.displayClientMessage(Component.literal("SmartParkour: возврат к " + home.getX() + " " + home.getY() + " " + home.getZ()), true);
                     returningHome = true;
                     target = null;
@@ -181,7 +184,7 @@ public final class SmartParkour implements ClientModInitializer {
             case ROTATE -> {
                 release(mc);
                 if (target == null || departure == null || !isTarget(mc, target) || !mc.player.onGround()) { reset(mc); return; }
-                if (rerouteThroughIntermediate(mc)) return;
+                if (movementMode != MovementMode.CHEAT && rerouteThroughIntermediate(mc)) return;
                 if (movementMode == MovementMode.CHEAT) {
                     // Feet are placed half a block ABOVE the top surface of the target.
                     // This is a client-side position change; servers may reject it.
@@ -191,11 +194,13 @@ public final class SmartParkour implements ClientModInitializer {
                     mc.player.setDeltaMovement(Vec3.ZERO);
                     mc.player.setPos(destination.getX() + 0.5, destination.getY() + 1.5, destination.getZ() + 0.5);
                     previousPlatform = source;
+                    cheatExpectedLanding = destination;
+                    cheatRequestedPosition = new Vec3(destination.getX() + .5, destination.getY() + 1.5, destination.getZ() + .5);
                     target = null;
                     departure = null;
                     landingPlatform = null;
                     clearRoute();
-                    transition(State.IDLE);
+                    transition(State.CHEAT_SETTLE);
                     return;
                 }
                 look(mc, target.getX() + .5, target.getZ() + .5);
@@ -204,7 +209,7 @@ public final class SmartParkour implements ClientModInitializer {
             case VERIFY -> {
                 release(mc);
                 if (target == null || departure == null || !isTarget(mc, target) || !mc.player.onGround()) { reset(mc); return; }
-                if (rerouteThroughIntermediate(mc)) return;
+                if (movementMode != MovementMode.CHEAT && rerouteThroughIntermediate(mc)) return;
                 if (!isFacing(mc, target)) {
                     look(mc, target.getX() + .5, target.getZ() + .5);
                     facingTicks = 0;
@@ -214,7 +219,7 @@ public final class SmartParkour implements ClientModInitializer {
             }
             case ALIGN -> {
                 if (target == null || !isTarget(mc, target) || !mc.player.onGround()) { reset(mc); return; }
-                if (rerouteThroughIntermediate(mc)) return;
+                if (movementMode != MovementMode.CHEAT && rerouteThroughIntermediate(mc)) return;
                 Vec3 pos = mc.player.position();
                 BlockPos under = departure;
                 double cx = under.getX() + .5, cz = under.getZ() + .5;
@@ -228,7 +233,7 @@ public final class SmartParkour implements ClientModInitializer {
             }
             case APPROACH -> {
                 if (target == null || !isTarget(mc, target) || !mc.player.onGround()) { reset(mc); return; }
-                if (rerouteThroughIntermediate(mc)) return;
+                if (movementMode != MovementMode.CHEAT && rerouteThroughIntermediate(mc)) return;
                 Vec3 pos = mc.player.position();
                 BlockPos under = departure;
                 double dx = target.getX() + .5 - (under.getX() + .5);
@@ -478,6 +483,29 @@ public final class SmartParkour implements ClientModInitializer {
                     phaseTicks = 0;
                 }
             }
+            case CHEAT_SETTLE -> {
+                release(mc);
+                if (cheatExpectedLanding == null || cheatRequestedPosition == null) { enabled = false; reset(mc); return; }
+                Vec3 actual = mc.player.position();
+                if (mc.player.onGround()) {
+                    BlockPos standing = mc.player.blockPosition().below();
+                    if (standing.equals(cheatExpectedLanding)) {
+                        cheatExpectedLanding = null;
+                        cheatRequestedPosition = null;
+                        transition(State.IDLE);
+                    } else {
+                        // Server rejected the move or player landed elsewhere.
+                        mc.player.displayClientMessage(Component.literal("SmartParkour: телепорт не подтверждён сервером"), true);
+                        enabled = false;
+                        reset(mc);
+                    }
+                } else if (phaseTicks >= CHEAT_SETTLE_TIMEOUT_TICKS
+                        || actual.distanceToSqr(cheatRequestedPosition) > 9.0) {
+                    mc.player.displayClientMessage(Component.literal("SmartParkour: телепорт отклонён или нет приземления"), true);
+                    enabled = false;
+                    reset(mc);
+                }
+            }
             case LAND -> {
                 release(mc);
                 if (phaseTicks >= (movementMode == MovementMode.BALANCED ? 0 : jumpDelayTicks)) transition(State.IDLE);
@@ -657,7 +685,7 @@ public final class SmartParkour implements ClientModInitializer {
         lastWatchPlatform = platform;
         return false;
     }
-    private void reset(Minecraft mc) { warpCommandSent = false; warpOrigin = null; warpCooldownTicks = 0; lastPlatePosition = null; plateStuckTicks = 0; warpDetected = false; clearInactivityWatch(); release(mc); returningHome = false; missingTargetTicks = 0; state = State.IDLE; target = null; departure = null; landingPlatform = null; centeredTicks = 0; queuedNextTarget = null; facingTicks = 0; airborneSeen = false; phaseTicks = 0; clearRoute(); }
+    private void reset(Minecraft mc) { warpCommandSent = false; warpOrigin = null; warpCooldownTicks = 0; lastPlatePosition = null; plateStuckTicks = 0; warpDetected = false; clearInactivityWatch(); release(mc); returningHome = false; missingTargetTicks = 0; state = State.IDLE; target = null; departure = null; landingPlatform = null; centeredTicks = 0; queuedNextTarget = null; cheatExpectedLanding = null; cheatRequestedPosition = null; facingTicks = 0; airborneSeen = false; phaseTicks = 0; clearRoute(); }
     private void transition(State next) { if (next != State.APPROACH || state != State.APPROACH) { approachStallTicks = 0; lastApproachPosition = null; } state = next; phaseTicks = 0; if (next == State.ROTATE) facingTicks = 0; if (next == State.FLIGHT) { airborneSeen = false; landingSneak = false; } }
     private static int readTicks(Properties p, String key, int def, int min, int max) {
         try { return Math.max(min, Math.min(max, Integer.parseInt(p.getProperty(key, Integer.toString(def))))); }
