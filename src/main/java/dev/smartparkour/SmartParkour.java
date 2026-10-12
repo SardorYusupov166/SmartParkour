@@ -25,6 +25,9 @@ import com.mojang.blaze3d.platform.InputConstants;
 
 /** Fresh 0.8 controller. No teleportation, no persistent key overrides. */
 public final class SmartParkour implements ClientModInitializer {
+    private enum MovementMode { CAUTIOUS, BALANCED, CHEAT }
+    private MovementMode movementMode = MovementMode.CAUTIOUS;
+    private BlockPos queuedNextTarget;
     private enum State { IDLE, ROTATE, VERIFY, ALIGN, APPROACH, FLIGHT, CENTER, LAND, RETURN_WARP, WALK_TO_PLATE, WAIT_FOR_START }
     private boolean landingSneak;
     private BlockPos home = new BlockPos(-65, 84, 306);
@@ -58,7 +61,7 @@ public final class SmartParkour implements ClientModInitializer {
     private KeyMapping toggle;
     private KeyMapping settingsKey;
     // 20 client ticks = approximately one second at normal TPS.
-    private int jumpDelayTicks = 10;
+    private int jumpDelayTicks = 2;
     private boolean enabled;
     private State state = State.IDLE;
     private BlockPos target;
@@ -72,13 +75,13 @@ public final class SmartParkour implements ClientModInitializer {
     private boolean airborneSeen;
     private int phaseTicks;
     private int phaseTimeoutTicks = 120;
-    private int facingConfirmTicks = 2;
+    private int facingConfirmTicks = 1;
     private int homeFacingConfirmTicks = 2;
     private boolean jumpLatch;
     private boolean toggleWasDown;
     private BlockPos landingPlatform;
     private int centeredTicks;
-    private int centerTimeoutTicks = 20;
+    private int centerTimeoutTicks = 12;
     private int inactivityTimeoutTicks = 100;
     private boolean inactivityRescue = false;
     private static volatile boolean continueInMenus = false;
@@ -115,7 +118,7 @@ public final class SmartParkour implements ClientModInitializer {
             clearRoute();
             missingTargetTicks = 0;
             returningHome = false;
-            if (mc.player != null) mc.player.displayClientMessage(Component.literal("SmartParkour 0.10.3: " + (enabled ? "ON" : "OFF")), true);
+            if (mc.player != null) mc.player.displayClientMessage(Component.literal("SmartParkour 0.10.7: " + (enabled ? "ON" : "OFF")), true);
         }
         toggleWasDown = down;
         if (!enabled || mc.player == null || mc.level == null) return;
@@ -179,6 +182,22 @@ public final class SmartParkour implements ClientModInitializer {
                 release(mc);
                 if (target == null || departure == null || !isTarget(mc, target) || !mc.player.onGround()) { reset(mc); return; }
                 if (rerouteThroughIntermediate(mc)) return;
+                if (movementMode == MovementMode.CHEAT) {
+                    // Feet are placed half a block ABOVE the top surface of the target.
+                    // This is a client-side position change; servers may reject it.
+                    BlockPos destination = target.immutable();
+                    BlockPos source = departure.immutable();
+                    release(mc);
+                    mc.player.setDeltaMovement(Vec3.ZERO);
+                    mc.player.setPos(destination.getX() + 0.5, destination.getY() + 1.5, destination.getZ() + 0.5);
+                    previousPlatform = source;
+                    target = null;
+                    departure = null;
+                    landingPlatform = null;
+                    clearRoute();
+                    transition(State.IDLE);
+                    return;
+                }
                 look(mc, target.getX() + .5, target.getZ() + .5);
                 transition(State.VERIFY);
             }
@@ -200,7 +219,10 @@ public final class SmartParkour implements ClientModInitializer {
                 BlockPos under = departure;
                 double cx = under.getX() + .5, cz = under.getZ() + .5;
                 if (!isFacing(mc, target)) { release(mc); transition(State.ROTATE); return; }
-                if (!withinCenter(pos.x, pos.z, under)) {
+                boolean balancedTakeoff = movementMode == MovementMode.BALANCED
+                        && Math.abs(pos.x - cx) <= 0.30 && Math.abs(pos.z - cz) <= 0.30
+                        && mc.player.getDeltaMovement().horizontalDistance() < 0.13;
+                if (!withinCenter(pos.x, pos.z, under) && !balancedTakeoff) {
                     steer(mc, cx - pos.x, cz - pos.z, false, false);
                 } else { release(mc); transition(State.APPROACH); }
             }
@@ -226,6 +248,7 @@ public final class SmartParkour implements ClientModInitializer {
                 // controlled takeoff closer to the edge, not a standing jump.
                 boolean longJump = dist >= 1.75;
                 boolean sprint = longJump || target.getY() > under.getY();
+                if (movementMode == MovementMode.BALANCED && dist >= 1.55) sprint = true;
                 // If movement is blocked for several ticks, jump rather than stall.
                 if (lastApproachPosition != null &&
                         Math.hypot(pos.x - lastApproachPosition.x, pos.z - lastApproachPosition.z) < 0.012)
@@ -236,7 +259,7 @@ public final class SmartParkour implements ClientModInitializer {
                 // For longer jumps, build horizontal velocity before takeoff.
                 double horizontalSpeed = mc.player.getDeltaMovement().horizontalDistance();
                 boolean readyToJump = !longJump || horizontalSpeed >= 0.11 || maxApproachDisplacement(pos, under) >= 0.39;
-                boolean jump = closeJump || (readyToJump && approachStallTicks >= approachStallLimitTicks) ||
+                boolean jump = (closeJump && (remain <= 0.16 || approachStallTicks >= approachStallLimitTicks)) || (readyToJump && approachStallTicks >= approachStallLimitTicks) ||
                         (readyToJump &&
                         remain <= Math.max(.10, horizontalSpeed * 1.35));
                 // Do not walk off the departure block while waiting for takeoff.
@@ -244,6 +267,8 @@ public final class SmartParkour implements ClientModInitializer {
                 double maxLocal = Math.max(Math.abs(pos.x - (under.getX() + .5)),
                                            Math.abs(pos.z - (under.getZ() + .5)));
                 if (maxLocal >= .40) jump = true;
+                if (movementMode == MovementMode.BALANCED && !jump && longJump
+                        && horizontalSpeed >= 0.16 && remain <= 0.24) jump = true;
                 steer(mc, ux, uz, sprint, jump);
                 if (jump) { jumpLatch = true; transition(State.FLIGHT); }
             }
@@ -303,7 +328,18 @@ public final class SmartParkour implements ClientModInitializer {
                     // Landing is confirmed: release sneak IMMEDIATELY.
                     landingSneak = false;
                     mc.options.keyShift.setDown(false);
-                    transition(State.CENTER);
+                    if (movementMode == MovementMode.BALANCED) {
+                        // Landing hand-off: avoid centering only when there is a stable,
+                        // comfortably interior landing. Otherwise use cautious CENTER.
+                        Vec3 landedVelocity = mc.player.getDeltaMovement();
+                        double lx = pos.x - (landingPlatform.getX() + 0.5);
+                        double lz = pos.z - (landingPlatform.getZ() + 0.5);
+                        if (Math.abs(lx) < 0.28 && Math.abs(lz) < 0.28
+                                && landedVelocity.horizontalDistance() < 0.095) {
+                            landingPlatform = null;
+                            transition(State.LAND);
+                        } else transition(State.CENTER);
+                    } else transition(State.CENTER);
                 } else if (mc.player.onGround() && airborneSeen && !landedAtSurface) {
                     // Grounded somewhere else: abort instead of selecting a
                     // second target or treating an edge collision as success.
@@ -338,9 +374,9 @@ public final class SmartParkour implements ClientModInitializer {
                 double distance = Math.hypot(ex, ez);
                 double speed = Math.hypot(vel.x, vel.z);
                 // Brake residual momentum instead of oscillating around the center.
-                if (withinCenter(pos.x, pos.z, landingPlatform) && speed < 0.035) {
+                if (withinCenter(pos.x, pos.z, landingPlatform) && speed < 0.055) {
                     releaseMovement(mc);
-                    if (++centeredTicks >= 3) {
+                    if (++centeredTicks >= 2) {
                         landingSneak = false;
                         mc.options.keyShift.setDown(false);
                         landingPlatform = null;
@@ -444,7 +480,7 @@ public final class SmartParkour implements ClientModInitializer {
             }
             case LAND -> {
                 release(mc);
-                if (phaseTicks >= jumpDelayTicks) transition(State.IDLE);
+                if (phaseTicks >= (movementMode == MovementMode.BALANCED ? 0 : jumpDelayTicks)) transition(State.IDLE);
             }
         }
     }
@@ -621,7 +657,7 @@ public final class SmartParkour implements ClientModInitializer {
         lastWatchPlatform = platform;
         return false;
     }
-    private void reset(Minecraft mc) { warpCommandSent = false; warpOrigin = null; warpCooldownTicks = 0; lastPlatePosition = null; plateStuckTicks = 0; warpDetected = false; clearInactivityWatch(); release(mc); returningHome = false; missingTargetTicks = 0; state = State.IDLE; target = null; departure = null; landingPlatform = null; centeredTicks = 0; facingTicks = 0; airborneSeen = false; phaseTicks = 0; clearRoute(); }
+    private void reset(Minecraft mc) { warpCommandSent = false; warpOrigin = null; warpCooldownTicks = 0; lastPlatePosition = null; plateStuckTicks = 0; warpDetected = false; clearInactivityWatch(); release(mc); returningHome = false; missingTargetTicks = 0; state = State.IDLE; target = null; departure = null; landingPlatform = null; centeredTicks = 0; queuedNextTarget = null; facingTicks = 0; airborneSeen = false; phaseTicks = 0; clearRoute(); }
     private void transition(State next) { if (next != State.APPROACH || state != State.APPROACH) { approachStallTicks = 0; lastApproachPosition = null; } state = next; phaseTicks = 0; if (next == State.ROTATE) facingTicks = 0; if (next == State.FLIGHT) { airborneSeen = false; landingSneak = false; } }
     private static int readTicks(Properties p, String key, int def, int min, int max) {
         try { return Math.max(min, Math.min(max, Integer.parseInt(p.getProperty(key, Integer.toString(def))))); }
@@ -636,13 +672,15 @@ public final class SmartParkour implements ClientModInitializer {
             int y = Integer.parseInt(props.getProperty("homeY", "84"));
             int z = Integer.parseInt(props.getProperty("homeZ", "306"));
             home = new BlockPos(x, y, z);
-            jumpDelayTicks = readTicks(props, "delayTicks", 10, 0, 200);
-            centerTimeoutTicks = readTicks(props, "centerTimeoutTicks", 20, 1, 200);
+            try { movementMode = MovementMode.valueOf(props.getProperty("movementMode", "CAUTIOUS")); }
+            catch (IllegalArgumentException ex) { movementMode = MovementMode.CAUTIOUS; }
+            jumpDelayTicks = readTicks(props, "delayTicks", 2, 0, 200);
+            centerTimeoutTicks = readTicks(props, "centerTimeoutTicks", 12, 1, 200);
             inactivityTimeoutTicks = readTicks(props, "inactivityTimeoutTicks", 100, 20, 600);
             noTargetTicks = readTicks(props, "noTargetTicks", 12, 1, 200);
             phaseTimeoutTicks = readTicks(props, "phaseTimeoutTicks", 120, 20, 600);
             approachStallLimitTicks = readTicks(props, "approachStallTicks", 5, 1, 100);
-            facingConfirmTicks = readTicks(props, "facingConfirmTicks", 2, 1, 20);
+            facingConfirmTicks = readTicks(props, "facingConfirmTicks", 1, 1, 20);
             homeFacingConfirmTicks = readTicks(props, "homeFacingConfirmTicks", 2, 1, 20);
             warpWaitTicks = readTicks(props, "warpWaitTicks", 160, 20, 600);
             walkToPlateTimeoutTicks = readTicks(props, "walkToPlateTimeoutTicks", 240, 20, 1200);
@@ -663,6 +701,7 @@ public final class SmartParkour implements ClientModInitializer {
             props.setProperty("homeX", Integer.toString(home.getX()));
             props.setProperty("homeY", Integer.toString(home.getY()));
             props.setProperty("homeZ", Integer.toString(home.getZ()));
+            props.setProperty("movementMode", movementMode.name());
             props.setProperty("delayTicks", Integer.toString(jumpDelayTicks));
             props.setProperty("centerTimeoutTicks", Integer.toString(centerTimeoutTicks));
             props.setProperty("inactivityTimeoutTicks", Integer.toString(inactivityTimeoutTicks));
@@ -686,6 +725,13 @@ public final class SmartParkour implements ClientModInitializer {
             System.err.println("SmartParkour: cannot save config: " + ex.getMessage());
         }
     }
+    private String modeLabel() {
+        return switch (movementMode) {
+            case CAUTIOUS -> "Осторожный";
+            case BALANCED -> "Сбалансированный";
+            case CHEAT -> "Читерский";
+        };
+    }
     private final class SettingsScreen extends Screen {
         private EditBox xField, yField, zField;
         private Component error = Component.empty();
@@ -698,7 +744,18 @@ public final class SmartParkour implements ClientModInitializer {
             if (recoveryTimersPage) { initRecoveryTimers(); return; }
             if (centeringPage) { initCentering(); return; }
             int center = this.width / 2;
-            int y = this.height / 2 - 135;
+            int y = this.height / 2 - 150;
+            addRenderableWidget(Button.builder(Component.literal("Режим: " + (modeLabel())), button -> {
+                movementMode = switch (movementMode) {
+                    case CAUTIOUS -> MovementMode.BALANCED;
+                    case BALANCED -> MovementMode.CHEAT;
+                    case CHEAT -> MovementMode.CAUTIOUS;
+                };
+                reset(Minecraft.getInstance());
+                saveConfig();
+                button.setMessage(Component.literal("Режим: " + (modeLabel())));
+            }).bounds(center - 110, y, 220, 20).build());
+            y += 28;
             addRenderableWidget(new AbstractSliderButton(center - 110, y, 220, 20,
                     Component.empty(), jumpDelayTicks / 100.0) {
                 { updateMessage(); }
