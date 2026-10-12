@@ -13,6 +13,10 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.charset.StandardCharsets;
 import java.util.Properties;
+import java.util.Set;
+import java.util.HashSet;
+import java.util.ArrayDeque;
+import java.util.Deque;
 import java.io.StringReader;
 import java.io.StringWriter;
 import net.minecraft.client.gui.components.AbstractSliderButton;
@@ -27,6 +31,12 @@ import com.mojang.blaze3d.platform.InputConstants;
 public final class SmartParkour implements ClientModInitializer {
     private enum MovementMode { CAUTIOUS, BALANCED, CHEAT }
     private MovementMode movementMode = MovementMode.CAUTIOUS;
+    private enum CheatTeleportTrigger { NEW_BLOCK, ON_LANDING }
+    private CheatTeleportTrigger cheatTeleportTrigger = CheatTeleportTrigger.ON_LANDING;
+    private final Set<BlockPos> cheatVisibleBeforeTeleport = new HashSet<>();
+    private final Set<BlockPos> cheatKnownPlatforms = new HashSet<>();
+    private final Deque<BlockPos> cheatQueue = new ArrayDeque<>();
+    private boolean cheatAwaitingSignal;
     private BlockPos queuedNextTarget;
     private BlockPos cheatExpectedLanding;
     private Vec3 cheatRequestedPosition;
@@ -121,7 +131,7 @@ public final class SmartParkour implements ClientModInitializer {
             clearRoute();
             missingTargetTicks = 0;
             returningHome = false;
-            if (mc.player != null) mc.player.displayClientMessage(Component.literal("SmartParkour 0.10.9: " + (enabled ? "ON" : "OFF")), true);
+            if (mc.player != null) mc.player.displayClientMessage(Component.literal("SmartParkour 0.10.11: " + (enabled ? "ON" : "OFF")), true);
         }
         toggleWasDown = down;
         if (!enabled || mc.player == null || mc.level == null) return;
@@ -145,7 +155,7 @@ public final class SmartParkour implements ClientModInitializer {
             return;
         }
         // A jump target is immutable until landing, failure or explicit cancellation.
-        if (!mc.player.onGround() && state != State.FLIGHT && state != State.LAND && state != State.CENTER && state != State.CHEAT_SETTLE) {
+        if (movementMode != MovementMode.CHEAT && !mc.player.onGround() && state != State.FLIGHT && state != State.LAND && state != State.CENTER && state != State.CHEAT_SETTLE) {
             if (target != null) transition(State.FLIGHT);
             else { release(mc); return; }
         }
@@ -191,6 +201,11 @@ public final class SmartParkour implements ClientModInitializer {
                     BlockPos destination = target.immutable();
                     BlockPos source = departure.immutable();
                     release(mc);
+                    if (cheatTeleportTrigger == CheatTeleportTrigger.NEW_BLOCK) {
+                        // Seed existing platforms as already known; they are not confirmations.
+                        if (cheatKnownPlatforms.isEmpty()) snapshotCheatTargets(mc, source);
+                        cheatQueue.remove(destination);
+                    }
                     mc.player.setDeltaMovement(Vec3.ZERO);
                     mc.player.setPos(destination.getX() + 0.5, destination.getY() + 1.5, destination.getZ() + 0.5);
                     previousPlatform = source;
@@ -200,6 +215,7 @@ public final class SmartParkour implements ClientModInitializer {
                     departure = null;
                     landingPlatform = null;
                     clearRoute();
+                    cheatAwaitingSignal = cheatTeleportTrigger == CheatTeleportTrigger.NEW_BLOCK;
                     transition(State.CHEAT_SETTLE);
                     return;
                 }
@@ -487,11 +503,42 @@ public final class SmartParkour implements ClientModInitializer {
                 release(mc);
                 if (cheatExpectedLanding == null || cheatRequestedPosition == null) { enabled = false; reset(mc); return; }
                 Vec3 actual = mc.player.position();
+                if (cheatTeleportTrigger == CheatTeleportTrigger.NEW_BLOCK) {
+                    // A newly appeared block ACKs the *previous* teleport; it is
+                    // appended to the queue, never used as an immediate destination.
+                    boolean appeared = scanCheatQueue(mc);
+                    if (appeared && cheatAwaitingSignal) {
+                        cheatAwaitingSignal = false;
+                        BlockPos next = pollCheatTarget(mc);
+                        if (next != null) {
+                            BlockPos old = cheatExpectedLanding;
+                            Vec3 nextPos = new Vec3(next.getX() + .5, next.getY() + 1.5, next.getZ() + .5);
+                            mc.player.setDeltaMovement(Vec3.ZERO);
+                            mc.player.setPos(nextPos.x, nextPos.y, nextPos.z);
+                            previousPlatform = old;
+                            cheatExpectedLanding = next;
+                            cheatRequestedPosition = nextPos;
+                            cheatAwaitingSignal = true;
+                            phaseTicks = 0;
+                        }
+                        return;
+                    }
+                    // Acknowledged, but no queued target yet: wait for a new one.
+                    // Do not require landing or trigger recovery/restart.
+                    if (!cheatAwaitingSignal) return;
+                    if (phaseTicks >= CHEAT_SETTLE_TIMEOUT_TICKS) {
+                        mc.player.displayClientMessage(Component.literal("SmartParkour: нет подтверждения нового блока"), true);
+                        enabled = false;
+                        reset(mc);
+                    }
+                    return;
+                }
                 if (mc.player.onGround()) {
                     BlockPos standing = mc.player.blockPosition().below();
                     if (standing.equals(cheatExpectedLanding)) {
                         cheatExpectedLanding = null;
                         cheatRequestedPosition = null;
+                        cheatVisibleBeforeTeleport.clear();
                         transition(State.IDLE);
                     } else {
                         // Server rejected the move or player landed elsewhere.
@@ -588,6 +635,42 @@ public final class SmartParkour implements ClientModInitializer {
         return true;
     }
 
+    private void snapshotCheatTargets(Minecraft mc, BlockPos center) {
+        cheatKnownPlatforms.clear();
+        cheatQueue.clear();
+        for (int x = -SEARCH_RADIUS; x <= SEARCH_RADIUS; x++)
+            for (int z = -SEARCH_RADIUS; z <= SEARCH_RADIUS; z++)
+                for (int y = -1; y <= 1; y++) {
+                    BlockPos p = center.offset(x, y, z);
+                    if (isTarget(mc, p)) cheatKnownPlatforms.add(p.immutable());
+                }
+    }
+    private boolean scanCheatQueue(Minecraft mc) {
+        // Keep the scanned region around the expected platform, even while airborne.
+        BlockPos center = cheatExpectedLanding;
+        if (center == null) return false;
+        boolean appeared = false;
+        for (int x = -SEARCH_RADIUS; x <= SEARCH_RADIUS; x++)
+            for (int z = -SEARCH_RADIUS; z <= SEARCH_RADIUS; z++)
+                for (int y = -1; y <= 1; y++) {
+                    BlockPos p = center.offset(x, y, z);
+                    if (!isTarget(mc, p)) continue;
+                    BlockPos immutable = p.immutable();
+                    if (cheatKnownPlatforms.add(immutable)) {
+                        appeared = true;
+                        if (!immutable.equals(center) && !immutable.equals(previousPlatform))
+                            cheatQueue.addLast(immutable);
+                    }
+                }
+        return appeared;
+    }
+    private BlockPos pollCheatTarget(Minecraft mc) {
+        while (!cheatQueue.isEmpty()) {
+            BlockPos p = cheatQueue.removeFirst();
+            if (!p.equals(cheatExpectedLanding) && isTarget(mc, p)) return p;
+        }
+        return null;
+    }
     private BlockPos findTarget(Minecraft mc) {
         BlockPos current = mc.player.blockPosition().below();
         BlockPos best = null;
@@ -685,7 +768,7 @@ public final class SmartParkour implements ClientModInitializer {
         lastWatchPlatform = platform;
         return false;
     }
-    private void reset(Minecraft mc) { warpCommandSent = false; warpOrigin = null; warpCooldownTicks = 0; lastPlatePosition = null; plateStuckTicks = 0; warpDetected = false; clearInactivityWatch(); release(mc); returningHome = false; missingTargetTicks = 0; state = State.IDLE; target = null; departure = null; landingPlatform = null; centeredTicks = 0; queuedNextTarget = null; cheatExpectedLanding = null; cheatRequestedPosition = null; facingTicks = 0; airborneSeen = false; phaseTicks = 0; clearRoute(); }
+    private void reset(Minecraft mc) { warpCommandSent = false; warpOrigin = null; warpCooldownTicks = 0; lastPlatePosition = null; plateStuckTicks = 0; warpDetected = false; clearInactivityWatch(); release(mc); returningHome = false; missingTargetTicks = 0; state = State.IDLE; target = null; departure = null; landingPlatform = null; centeredTicks = 0; queuedNextTarget = null; cheatExpectedLanding = null; cheatRequestedPosition = null; cheatVisibleBeforeTeleport.clear(); cheatKnownPlatforms.clear(); cheatQueue.clear(); cheatAwaitingSignal = false; facingTicks = 0; airborneSeen = false; phaseTicks = 0; clearRoute(); }
     private void transition(State next) { if (next != State.APPROACH || state != State.APPROACH) { approachStallTicks = 0; lastApproachPosition = null; } state = next; phaseTicks = 0; if (next == State.ROTATE) facingTicks = 0; if (next == State.FLIGHT) { airborneSeen = false; landingSneak = false; } }
     private static int readTicks(Properties p, String key, int def, int min, int max) {
         try { return Math.max(min, Math.min(max, Integer.parseInt(p.getProperty(key, Integer.toString(def))))); }
@@ -702,6 +785,8 @@ public final class SmartParkour implements ClientModInitializer {
             home = new BlockPos(x, y, z);
             try { movementMode = MovementMode.valueOf(props.getProperty("movementMode", "CAUTIOUS")); }
             catch (IllegalArgumentException ex) { movementMode = MovementMode.CAUTIOUS; }
+            try { cheatTeleportTrigger = CheatTeleportTrigger.valueOf(props.getProperty("cheatTeleportTrigger", "ON_LANDING")); }
+            catch (IllegalArgumentException ex) { cheatTeleportTrigger = CheatTeleportTrigger.ON_LANDING; }
             jumpDelayTicks = readTicks(props, "delayTicks", 2, 0, 200);
             centerTimeoutTicks = readTicks(props, "centerTimeoutTicks", 12, 1, 200);
             inactivityTimeoutTicks = readTicks(props, "inactivityTimeoutTicks", 100, 20, 600);
@@ -730,6 +815,7 @@ public final class SmartParkour implements ClientModInitializer {
             props.setProperty("homeY", Integer.toString(home.getY()));
             props.setProperty("homeZ", Integer.toString(home.getZ()));
             props.setProperty("movementMode", movementMode.name());
+            props.setProperty("cheatTeleportTrigger", cheatTeleportTrigger.name());
             props.setProperty("delayTicks", Integer.toString(jumpDelayTicks));
             props.setProperty("centerTimeoutTicks", Integer.toString(centerTimeoutTicks));
             props.setProperty("inactivityTimeoutTicks", Integer.toString(inactivityTimeoutTicks));
@@ -781,9 +867,18 @@ public final class SmartParkour implements ClientModInitializer {
                 };
                 reset(Minecraft.getInstance());
                 saveConfig();
-                button.setMessage(Component.literal("Режим: " + (modeLabel())));
+                clearWidgets(); init();
             }).bounds(center - 110, y, 220, 20).build());
             y += 28;
+            if (movementMode == MovementMode.CHEAT) {
+                addRenderableWidget(Button.builder(Component.literal("Следующий ТП: " + (cheatTeleportTrigger == CheatTeleportTrigger.NEW_BLOCK ? "Новый блок" : "Приземление")), button -> {
+                    cheatTeleportTrigger = cheatTeleportTrigger == CheatTeleportTrigger.NEW_BLOCK ? CheatTeleportTrigger.ON_LANDING : CheatTeleportTrigger.NEW_BLOCK;
+                    reset(Minecraft.getInstance());
+                    saveConfig();
+                    button.setMessage(Component.literal("Следующий ТП: " + (cheatTeleportTrigger == CheatTeleportTrigger.NEW_BLOCK ? "Новый блок" : "Приземление")));
+                }).bounds(center - 110, y, 220, 20).build());
+                y += 28;
+            }
             addRenderableWidget(new AbstractSliderButton(center - 110, y, 220, 20,
                     Component.empty(), jumpDelayTicks / 100.0) {
                 { updateMessage(); }
