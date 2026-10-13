@@ -1,1 +1,5 @@
-SmartParkour 0.10.11: CHEAT mode has selectable NEW_BLOCK acknowledgement/queued teleport and ON_LANDING teleport. New blocks signal completion and join FIFO queue; existing blocks do not trigger the signal. Build/test not verified.
+# SmartParkour 1.0.1
+
+Progress-based inactivity watchdog; staged recovery, stage timeouts, wait-for-start retries. All three movement modes and both teleport triggers retained.
+
+Source only; build and in-game behavior not verified.
